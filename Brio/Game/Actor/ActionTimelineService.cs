@@ -1,4 +1,5 @@
 ﻿using Brio.Capabilities.Actor;
+using Brio.Core;
 using Brio.Entities;
 using Dalamud.Game;
 using Dalamud.Hooking;
@@ -27,10 +28,10 @@ public unsafe class ActionTimelineService : IDisposable
     }
 
     private delegate bool CalculateAndApplyOverallSpeedDelegate(TimelineContainer* a1);
-    private readonly Hook<CalculateAndApplyOverallSpeedDelegate> _calculateAndApplyOverallSpeedHook = null!;
+    private readonly Hook<CalculateAndApplyOverallSpeedDelegate>? _calculateAndApplyOverallSpeedHook;
 
     private delegate void SetSlotSpeedDelegate(ActionTimelineSequencer* a1, ActionTimelineSlots slot, float speed);
-    private readonly Hook<SetSlotSpeedDelegate> _setSpeedSlotHook = null!;
+    private readonly Hook<SetSlotSpeedDelegate>? _setSpeedSlotHook;
 
     private readonly EntityManager _entityManager;
 
@@ -38,17 +39,19 @@ public unsafe class ActionTimelineService : IDisposable
     {
         _entityManager = entityManager;
 
-        var calculateAndApplyAddress = scanner.ScanText("E8 ?? ?? ?? ?? 48 8D 8B ?? ?? ?? ?? 48 8B 01 FF 50 ?? 48 8D 8B ?? ?? ?? ?? 48 8B 01 FF 50 ?? F6 83");
-        _calculateAndApplyOverallSpeedHook = hooking.HookFromAddress<CalculateAndApplyOverallSpeedDelegate>(calculateAndApplyAddress, CalculateAndApplyOverallSpeedDetour);
-        _calculateAndApplyOverallSpeedHook.Enable();
+        _calculateAndApplyOverallSpeedHook = NativeBinding.ScanHook<CalculateAndApplyOverallSpeedDelegate>(scanner, hooking,
+            "E8 ?? ?? ?? ?? 48 8D 8B ?? ?? ?? ?? 48 8B 01 FF 50 ?? 48 8D 8B ?? ?? ?? ?? 48 8B 01 FF 50 ?? F6 83",
+            CalculateAndApplyOverallSpeedDetour, "動畫整體速度 CalculateAndApplyOverallSpeed");
 
-        _setSpeedSlotHook = hooking.HookFromAddress<SetSlotSpeedDelegate>(ActionTimelineSequencer.Addresses.SetSlotSpeed.Value, SetSlotSpeedDetour);
-        _setSpeedSlotHook.Enable();
+        var setSlotSpeedAddress = ActionTimelineSequencer.Addresses.SetSlotSpeed.Value;
+        if(setSlotSpeedAddress == nint.Zero)
+            NativeBinding.Fail("動畫分軌速度 SetSlotSpeed", "FFXIVClientStructs 未能在本客戶端解析此位址");
+        _setSpeedSlotHook = NativeBinding.CreateHook<SetSlotSpeedDelegate>(hooking, setSlotSpeedAddress, SetSlotSpeedDetour, "動畫分軌速度 SetSlotSpeed");
     }
 
     private bool CalculateAndApplyOverallSpeedDetour(TimelineContainer* a1)
     {
-        bool result = _calculateAndApplyOverallSpeedHook.Original(a1);
+        bool result = _calculateAndApplyOverallSpeedHook!.Original(a1);
         if(_entityManager.TryGetEntity(a1->OwnerObject, out var entity))
         {
             if(entity.TryGetCapability<ActionTimelineCapability>(out var atc))
@@ -85,12 +88,12 @@ public unsafe class ActionTimelineService : IDisposable
             }
 
         }
-        _setSpeedSlotHook.Original(a1, slot, finalSpeed);
+        _setSpeedSlotHook!.Original(a1, slot, finalSpeed);
     }
 
     public void Dispose()
     {
-        _calculateAndApplyOverallSpeedHook.Dispose();
-        _setSpeedSlotHook.Dispose();
+        _calculateAndApplyOverallSpeedHook?.Dispose();
+        _setSpeedSlotHook?.Dispose();
     }
 }

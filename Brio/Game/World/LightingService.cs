@@ -57,7 +57,7 @@ public unsafe class LightingService : IDisposable
     private readonly unsafe delegate* unmanaged<GameLight*, void> _updateGameLightMaterial;
 
     private delegate bool ToggleLightDelegate(EventGPoseControllerEX* state, uint index);
-    private readonly Hook<ToggleLightDelegate> _toggleLightHook = null!;
+    private readonly Hook<ToggleLightDelegate>? _toggleLightHook;
 
     private readonly unsafe delegate* unmanaged<EventGPoseControllerEX*, uint, char> _toggleGPoseLight;
 
@@ -86,36 +86,40 @@ public unsafe class LightingService : IDisposable
         _virtualCameraManager = virtualCameraManager;
         _framework = framework;
 
-        var spawnGameLightAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 48 89 84 ?? ?? ?? ?? ?? 48 85 C0 0F ?? ?? ?? ?? ?? 48 8B C8");
+        var spawnGameLightAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? 48 89 84 ?? ?? ?? ?? ?? 48 85 C0 0F ?? ?? ?? ?? ?? 48 8B C8", "光源:配置 SpawnGameLight");
         _spawnGameLight = (delegate* unmanaged<GameLight*, void>)spawnGameLightAddress;
 
-        var createGameLightAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B D3 E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 40 0F");
+        var createGameLightAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B D3 E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 40 0F", "光源:建立 CreateGameLight");
         _spawnGameLightCreate = (delegate* unmanaged<GameLight*, void>)createGameLightAddress;
 
-        var finalizeGameLightAddress = sigScanner.ScanText("F6 41 38 01 ?? ?? 48 8B ?? ?? ?? ?? ?? 48");
+        var finalizeGameLightAddress = NativeBinding.Scan(sigScanner, "F6 41 38 01 ?? ?? 48 8B ?? ?? ?? ?? ?? 48", "光源:結算 FinalizeGameLight");
         _spawnGameLightFinalize = (delegate* unmanaged<GameLight*, void>)finalizeGameLightAddress;
 
-        var updateGameLightTypeRangeAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8D 55");
+        var updateGameLightTypeRangeAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8D 55", "光源:類型/範圍更新");
         _updateGameLightRange = (delegate* unmanaged<LightRenderObject*, char, void>)updateGameLightTypeRangeAddress;
 
-        var updateGameLightCullingAddress = sigScanner.ScanText("48 89 5C 24 ?? 57 48 83 EC 40 48 8B B9 ?? ?? ?? ??");
+        var updateGameLightCullingAddress = NativeBinding.Scan(sigScanner, "48 89 5C 24 ?? 57 48 83 EC 40 48 8B B9 ?? ?? ?? ??", "光源:剔除更新 UpdateCulling");
         _updateGameLightCulling = (delegate* unmanaged<GameLight*, void>)updateGameLightCullingAddress;
 
-        var updateGameLightMaterialAddress = sigScanner.ScanText("40 53 48 83 EC 20 0F B6 81 ?? ?? ?? ?? 48 8B D9 A8 04 75 45 0C 04 B2 05");
+        var updateGameLightMaterialAddress = NativeBinding.Scan(sigScanner, "40 53 48 83 EC 20 0F B6 81 ?? ?? ?? ?? 48 8B D9 A8 04 75 45 0C 04 B2 05", "光源:材質更新 UpdateMaterial");
         _updateGameLightMaterial = (delegate* unmanaged<GameLight*, void>)updateGameLightMaterialAddress;
 
-        var toggleLightHookAddress = sigScanner.ScanText("48 83 EC 28 4C 8B C1 83 FA 03 ?? ?? 8B C2");
+        var toggleLightHookAddress = NativeBinding.Scan(sigScanner, "48 83 EC 28 4C 8B C1 83 FA 03 ?? ?? 8B C2", "光源:GPose 光源開關 ToggleLight");
 
         _toggleGPoseLight = (delegate* unmanaged<EventGPoseControllerEX*, uint, char>)toggleLightHookAddress;
 
-        _toggleLightHook = hooks.HookFromAddress<ToggleLightDelegate>(toggleLightHookAddress, ToggleLightDetour);
-        _toggleLightHook.Enable();
+        _toggleLightHook = NativeBinding.CreateHook<ToggleLightDelegate>(hooks, toggleLightHookAddress, ToggleLightDetour, "光源:GPose 光源開關 ToggleLight");
 
         _gPoseService.OnGPoseStateChange += OnGPoseStateChange;
         _framework.Update += OnFrameworkUpdate;
     }
 
-    public char ToggleGPoseLight(EventGPoseControllerEX* ptr, uint index) => _toggleGPoseLight(ptr, index);
+    /// <summary>自訂光源需要的六個原生函式全部繫結成功才可用。</summary>
+    public bool IsLightingAvailable => _spawnGameLight != null && _spawnGameLightCreate != null && _spawnGameLightFinalize != null
+        && _updateGameLightCulling != null && _updateGameLightMaterial != null && _updateGameLightRange != null;
+
+    public char ToggleGPoseLight(EventGPoseControllerEX* ptr, uint index)
+        => _toggleGPoseLight == null ? (char)0 : _toggleGPoseLight(ptr, index);
 
     public unsafe bool ToggleLightDetour(EventGPoseControllerEX* state, uint index)
     {
@@ -125,7 +129,7 @@ public unsafe class LightingService : IDisposable
         // This is because this only fires when you "click" the light toggle buttons in Gpose
         //
 
-        var result = _toggleLightHook.Original(state, index);
+        var result = _toggleLightHook!.Original(state, index);
 
         try
         {
@@ -162,7 +166,7 @@ public unsafe class LightingService : IDisposable
 
     public void UpdateLight(GameLight* light)
     {
-        if(light is not null)
+        if(light is not null && _updateGameLightCulling != null && _updateGameLightMaterial != null)
         {
             _updateGameLightCulling(light);
             _updateGameLightMaterial(light);
@@ -219,6 +223,10 @@ public unsafe class LightingService : IDisposable
 
     public unsafe GameLight* SpawnGameLight(LightType lightType)
     {
+        // 原生光源函式沒繫結上時直接放棄:呼叫 null 函式指標是 AVE,try/catch 攔不到。
+        if(IsLightingAvailable == false)
+            return null;
+
         // This causes memory fragmentation over time I think, maybe we can implement a pooling system later?
         GameLight* light = (GameLight*)NativeHelpers.AllocateAlignedMemory(sizeof(GameLight), 8).Aligned;
 
@@ -502,7 +510,7 @@ public unsafe class LightingService : IDisposable
 
     public void Dispose()
     {
-        _toggleLightHook.Dispose();
+        _toggleLightHook?.Dispose();
 
         _gPoseService.OnGPoseStateChange -= OnGPoseStateChange;
         _framework.Update -= OnFrameworkUpdate;

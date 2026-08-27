@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Brio.Entities;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Actor.Extensions;
@@ -36,13 +37,13 @@ public class ActorAppearanceService : IDisposable
     private readonly DalamudService _dalamudService;
 
     private delegate byte EnforceKindRestrictionsDelegate(nint a1, nint a2);
-    private readonly Hook<EnforceKindRestrictionsDelegate> _enforceKindRestrictionsHook = null!;
+    private readonly Hook<EnforceKindRestrictionsDelegate>? _enforceKindRestrictionsHook;
 
     private delegate nint UpdateWetnessDelegate(nint a1);
-    private readonly Hook<UpdateWetnessDelegate> _updateWetnessHook = null!;
+    private readonly Hook<UpdateWetnessDelegate>? _updateWetnessHook;
 
     private unsafe delegate nint UpdateTintDelegate(nint charaBase, nint tint);
-    private readonly Hook<UpdateTintDelegate> _updateTintHook = null!;
+    private readonly Hook<UpdateTintDelegate>? _updateTintHook;
 
     private unsafe delegate* unmanaged<DrawDataContainer*, ushort, ushort, void> _setFacewear;
 
@@ -66,19 +67,22 @@ public class ActorAppearanceService : IDisposable
         _dalamudService = dalamudService;
         _characterHandlerService = characterHandlerService;
 
-        var enforceKindRestrictionsAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 41 B0 ?? 48 8B D6 48 8B");
-        _enforceKindRestrictionsHook = hooks.HookFromAddress<EnforceKindRestrictionsDelegate>(enforceKindRestrictionsAddress, EnforceKindRestrictionsDetour);
-        _enforceKindRestrictionsHook.Enable();
+        _enforceKindRestrictionsHook = NativeBinding.ScanHook<EnforceKindRestrictionsDelegate>(sigScanner, hooks,
+            "E8 ?? ?? ?? ?? 41 B0 ?? 48 8B D6 48 8B", EnforceKindRestrictionsDetour, "外觀種族限制 EnforceKindRestrictions");
 
-        var updateWetnessAddress = sigScanner.ScanText("40 53 48 83 EC ?? 48 8B 01 48 8B D9 FF 90 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 03 48 8B CB 48 83 C4");
-        _updateWetnessHook = hooks.HookFromAddress<UpdateWetnessDelegate>(updateWetnessAddress, UpdateWetnessDetour);
-        _updateWetnessHook.Enable();
+        _updateWetnessHook = NativeBinding.ScanHook<UpdateWetnessDelegate>(sigScanner, hooks,
+            "40 53 48 83 EC ?? 48 8B 01 48 8B D9 FF 90 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 03 48 8B CB 48 83 C4", UpdateWetnessDetour, "濕潤度 UpdateWetness");
 
-        var updateTintHookAddress = Marshal.ReadInt64((nint)(CharacterBase.StaticVirtualTablePointer) + 0xC0);
-        _updateTintHook = hooks.HookFromAddress<UpdateTintDelegate>((nint)updateTintHookAddress, UpdateTintDetour);
-        _updateTintHook.Enable();
+        // CharacterBase 虛擬表槽 0xC0/8 = 24。虛擬表指標解不出來時讀它是 AccessViolation,先判空。
+        nint updateTintHookAddress = nint.Zero;
+        var charaBaseVTable = (nint)CharacterBase.StaticVirtualTablePointer;
+        if(charaBaseVTable == nint.Zero)
+            NativeBinding.Fail("角色染色 UpdateTint", "CharacterBase 靜態虛擬表指標未解析");
+        else
+            updateTintHookAddress = (nint)Marshal.ReadInt64(charaBaseVTable + 0xC0);
+        _updateTintHook = NativeBinding.CreateHook<UpdateTintDelegate>(hooks, updateTintHookAddress, UpdateTintDetour, "角色染色 UpdateTint");
 
-        var setFacewearAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? FF C3 48 8D ?? ?? ?? ?? ?? ?? ?? 0F");
+        var setFacewearAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? FF C3 48 8D ?? ?? ?? ?? ?? ?? ?? 0F", "臉部裝飾 SetFacewear");
         _setFacewear = (delegate* unmanaged<DrawDataContainer*, ushort, ushort, void>)setFacewearAddress;
     }
 
@@ -211,7 +215,8 @@ public class ActorAppearanceService : IDisposable
                     }
                     else
                     {
-                        _setFacewear(&native->DrawData, 0, appearance.Facewear);
+                        if(_setFacewear != null)
+                            _setFacewear(&native->DrawData, 0, appearance.Facewear);
                     }
                 }
             }
@@ -343,7 +348,7 @@ public class ActorAppearanceService : IDisposable
         if(_configurationService.Configuration.Appearance.ApplyNPCHack == ApplyNPCHack.InGPose && _gPoseService.IsGPosing)
             return 0;
 
-        return _enforceKindRestrictionsHook.Original(a1, a2);
+        return _enforceKindRestrictionsHook!.Original(a1, a2);
     }
 
     private nint UpdateWetnessDetour(nint a1)
@@ -351,7 +356,7 @@ public class ActorAppearanceService : IDisposable
         if(_gPoseService.IsGPosing)
             return 0;
 
-        return _updateWetnessHook.Original(a1);
+        return _updateWetnessHook!.Original(a1);
     }
 
     private nint UpdateTintDetour(nint charaBase, nint tint)
@@ -359,14 +364,14 @@ public class ActorAppearanceService : IDisposable
         if(_gPoseService.IsGPosing && CanTint)
             return 0;
 
-        return _updateTintHook.Original(charaBase, tint);
+        return _updateTintHook!.Original(charaBase, tint);
     }
 
     public void Dispose()
     {
-        _enforceKindRestrictionsHook.Dispose();
-        _updateWetnessHook.Dispose();
-        _updateTintHook.Dispose();
+        _enforceKindRestrictionsHook?.Dispose();
+        _updateWetnessHook?.Dispose();
+        _updateTintHook?.Dispose();
 
         GC.SuppressFinalize(this);
     }

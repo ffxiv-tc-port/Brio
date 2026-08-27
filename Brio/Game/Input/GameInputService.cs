@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Brio.Game.Camera;
 using Brio.Game.GPose;
 using Brio.Input;
@@ -22,7 +23,7 @@ public class GameInputService : IDisposable
     public bool HandleAllMouse { get; set; } = false;
 
     private unsafe delegate void HandleInputDelegate(IntPtr arg1, IntPtr arg2, IntPtr arg3, MouseFrame* mouseState, KeyboardFrame* keyboardState);
-    private readonly Hook<HandleInputDelegate> _handleInputHook = null!;
+    private readonly Hook<HandleInputDelegate>? _handleInputHook;
 
     //
 
@@ -49,8 +50,7 @@ public class GameInputService : IDisposable
         _configurationService = configurationService;
 
         var inputHandleSig = "E8 ?? ?? ?? ?? ?? 8B ?? ?? ?? ?? 8B 87 ?? ?? ?? ?? 89 45";
-        _handleInputHook = hooking.HookFromAddress<HandleInputDelegate>(scanner.ScanText(inputHandleSig), HandleInputDetour);
-        _handleInputHook.Enable();
+        _handleInputHook = NativeBinding.ScanHook<HandleInputDelegate>(scanner, hooking, inputHandleSig, HandleInputDetour, "遊戲輸入 HandleInput");
 
         _configurationService.OnConfigurationChanged += OnConfigurationChanged;
 
@@ -91,7 +91,7 @@ public class GameInputService : IDisposable
     {
         // This is a hot path, all of the games input flows through here 
 
-        _handleInputHook.Original(arg1, arg2, arg3, mouseFrame, keyboardFrame);
+        _handleInputHook!.Original(arg1, arg2, arg3, mouseFrame, keyboardFrame);
 
         if(_gPoseService.IsGPosing is false)
             return;
@@ -174,7 +174,7 @@ public class GameInputService : IDisposable
 
     public void Dispose()
     {
-        _handleInputHook.Dispose();
+        _handleInputHook?.Dispose();
 
         _configurationService.OnConfigurationChanged -= OnConfigurationChanged;
 

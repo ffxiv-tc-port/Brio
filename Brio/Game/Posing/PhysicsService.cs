@@ -9,6 +9,7 @@
 // Thank you Winter!
 //
 
+using Brio.Core;
 using Brio.Game.GPose;
 using Dalamud.Game;
 using Dalamud.Memory;
@@ -41,11 +42,15 @@ public unsafe partial class PhysicsService : IDisposable
         // This signature is from Anamnesis (https://github.com/imchillin/Anamnesis)
         // Found in AddressService.cs on line 159 - SkeletonFreezePhysics (1/2/3)
         var freezePhysicsAddress = "0F 11 48 10 41 0F 10 44 24 ?? 0F 11 40 20 48 8B 46 28";
-        if(!scanner.TryScanText(freezePhysicsAddress, out this._freezePhysicsAddress))
-            this._freezePhysicsAddress = 0;
+        _freezePhysicsAddress = NativeBinding.Scan(scanner, freezePhysicsAddress, "凍結物理 SkeletonFreezePhysics");
 
-        _originalPhysicsBytes1 = MemoryHelper.ReadRaw(_freezePhysicsAddress, 4);
-        _originalPhysicsBytes2 = MemoryHelper.ReadRaw(_freezePhysicsAddress - 0x9, 3);
+        // 🔴 上游在特徵碼失敗時把位址設成 0 之後照樣 ReadRaw ⇒ 讀位址 0 是 AccessViolation,
+        // 而 AVE 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。這裡改成直接停用。
+        if(_freezePhysicsAddress != nint.Zero)
+        {
+            _originalPhysicsBytes1 = MemoryHelper.ReadRaw(_freezePhysicsAddress, 4);
+            _originalPhysicsBytes2 = MemoryHelper.ReadRaw(_freezePhysicsAddress - 0x9, 3);
+        }
 
         //var handlePhysicsSig = "E9 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 41 ?? ?? ?? 4c ?? ?? 30 ?? ?? ?? 41"; // e9 2d e0 09 00 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 41 0f b6 c0 4c 8b d1 45 8b c8 48 69 c8 20 02 00 00
         //_handlePhysicsDelegate = hooking.HookFromAddress<HandlePhysicsDelegate>(scanner.ScanText(handlePhysicsSig), HandlePhysicsDetour);
@@ -62,10 +67,17 @@ public unsafe partial class PhysicsService : IDisposable
     //    _handlePhysicsDelegate.Original(arg1, arg2, arg3, arg4, arg5);
     //}
 
+    /// <summary>凍結物理需要對遊戲碼寫入 NOP;特徵碼失效時整個功能停用。</summary>
+    public bool IsAvailable => _freezePhysicsAddress != nint.Zero
+        && _originalPhysicsBytes1.Length == 4 && _originalPhysicsBytes2.Length == 3;
+
     public bool FreezeToggle() => IsFreezeEnabled ? FreezeRevert() : FreezeEnable();
 
     public bool FreezeRevert()
     {
+        if(IsAvailable == false)
+            return IsFreezeEnabled = false;
+
         ReplaceRaw(_freezePhysicsAddress, _originalPhysicsBytes1);
         ReplaceRaw(_freezePhysicsAddress - 0x9, _originalPhysicsBytes2);
 
@@ -74,6 +86,9 @@ public unsafe partial class PhysicsService : IDisposable
 
     public bool FreezeEnable()
     {
+        if(IsAvailable == false)
+            return IsFreezeEnabled = false;
+
         _originalPhysicsBytes1 = ReplaceRaw(_freezePhysicsAddress, [0x90, 0x90, 0x90, 0x90]);
         _originalPhysicsBytes2 = ReplaceRaw(_freezePhysicsAddress - 0x9, [0x90, 0x90, 0x90]);
 

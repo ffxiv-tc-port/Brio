@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Brio.Game.GPose;
 using Dalamud.Game;
 using Dalamud.Hooking;
@@ -12,9 +13,11 @@ public class TimeService : IDisposable
 {
     public bool IsTimeFrozen
     {
-        get => _updateEorzeaTimeHook.IsEnabled;
+        get => _updateEorzeaTimeHook?.IsEnabled == true;
         set
         {
+            if(_updateEorzeaTimeHook is null)
+                return;
 
             if(value != IsTimeFrozen)
             {
@@ -83,7 +86,7 @@ public class TimeService : IDisposable
     }
 
     private delegate void UpdateEorzeaTimeDelegate(IntPtr a1, IntPtr a2);
-    private readonly Hook<UpdateEorzeaTimeDelegate> _updateEorzeaTimeHook = null!;
+    private readonly Hook<UpdateEorzeaTimeDelegate>? _updateEorzeaTimeHook;
 
     private readonly IClientState _clientState;
     private readonly GPoseService _gPoseService;
@@ -95,8 +98,9 @@ public class TimeService : IDisposable
         _gPoseService = gPoseService;
         _configurationService = configurationService;
 
-        var etAddress = scanner.ScanText("48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 48 8B DA 48 81 C1 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C");
-        _updateEorzeaTimeHook = hooking.HookFromAddress<UpdateEorzeaTimeDelegate>(etAddress, UpdateEorzeaTime);
+        _updateEorzeaTimeHook = NativeBinding.ScanHook<UpdateEorzeaTimeDelegate>(scanner, hooking,
+            "48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 48 8B DA 48 81 C1 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C",
+            UpdateEorzeaTime, "凍結艾歐澤亞時間 UpdateEorzeaTime", enable: false);
 
         _clientState.TerritoryChanged += OnTerritoryChanged;
         _gPoseService.OnGPoseStateChange += OnGPoseStateChanged;

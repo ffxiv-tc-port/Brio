@@ -22,9 +22,9 @@ public unsafe class IKService : IDisposable
 
     public IKService(ISigScanner scanner)
     {
-        _ccdSolverCtr = (delegate* unmanaged<hkaCCDSolver*, int, float, void>)scanner.ScanText("E8 ?? ?? ?? ?? 48 8D 43 ?? 48 C7 43");
-        _ccdSolverSolve = (delegate* unmanaged<hkaCCDSolver*, byte*, hkArray<CCDIKConstraint>*, hkaPose*, byte*>)scanner.ScanText("E8 ?? ?? ?? ?? 8B 44 24 ?? 48 8B 5C 24 ?? 48 3B 5C 24");
-        _twoJointSolverSolve = (delegate* unmanaged<byte*, TwoJointIKSetup*, hkaPose*, byte*>)scanner.ScanText("E8 ?? ?? ?? ?? 0F 28 55 ?? 41 0F 28 D8");
+        _ccdSolverCtr = (delegate* unmanaged<hkaCCDSolver*, int, float, void>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 48 8D 43 ?? 48 C7 43", "IK:CCD 解算器建構");
+        _ccdSolverSolve = (delegate* unmanaged<hkaCCDSolver*, byte*, hkArray<CCDIKConstraint>*, hkaPose*, byte*>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 8B 44 24 ?? 48 8B 5C 24 ?? 48 3B 5C 24", "IK:CCD 解算");
+        _twoJointSolverSolve = (delegate* unmanaged<byte*, TwoJointIKSetup*, hkaPose*, byte*>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 0F 28 55 ?? 41 0F 28 D8", "IK:雙關節解算");
 
         _solverAddr = NativeHelpers.AllocateAlignedMemory(sizeof(hkaCCDSolver), 16);
         _ccdConstraintCtrAddr = NativeHelpers.AllocateAlignedMemory(sizeof(CCDIKConstraint), 16);
@@ -34,8 +34,14 @@ public unsafe class IKService : IDisposable
         *setup = new TwoJointIKSetup();
     }
 
+    /// <summary>三個原生解算器都繫結成功時才可用。任一失效就整個 IK 停用(呼叫 null 函式指標是 AVE)。</summary>
+    public bool IsAvailable => _ccdSolverCtr != null && _ccdSolverSolve != null && _twoJointSolverSolve != null;
+
     public void SolveIK(hkaPose* pose, BoneIKInfo ikInfo, Bone bone, Vector3 target)
     {
+        if(IsAvailable == false)
+            return;
+
         ikInfo.SolverOptions.Switch(
             ccd =>
             {
