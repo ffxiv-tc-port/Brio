@@ -1,4 +1,4 @@
-﻿<Project Sdk="Dalamud.NET.SDK/13.1.0">
+﻿<Project Sdk="Dalamud.NET.Sdk/13.0.0">
 
 	<PropertyGroup>
 		<TargetFramework>net9.0-windows</TargetFramework>
@@ -39,7 +39,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <PackageReference Update="DalamudPackager" Version="13.1.0" />
+	  <PackageReference Update="DalamudPackager" Version="13.0.0" />
 	  <PackageReference Update="DotNet.ReproducibleBuilds" Version="1.2.39" />
 	</ItemGroup>
 
