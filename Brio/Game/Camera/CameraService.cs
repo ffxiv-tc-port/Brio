@@ -56,8 +56,13 @@ public unsafe class CameraService : IDisposable
         var cameraUpdateAddr = "40 55 53 57 48 8D 6C 24 A0 48 81 EC ?? ?? ?? ?? 48 8B 1D";
         _cameraUpdateHook = NativeBinding.ScanHook<CameraUpdateDelegate>(scanner, hooking, cameraUpdateAddr, CameraUpdateDetour, "攝影機更新 CameraUpdate");
 
+        // ⚠️ 台服上這條有 2 個命中(0x1403FF3D0 / 0x1403FF810),兩支都是「測 [rcx+0xF0] 位元 0 之後
+        //    把 rcx+0x50/0x60/0x70 餵給同一支矩陣函式」的場景攝影機更新,離線分不出哪一支才是
+        //    Brio 要的那個。取第一個(與上游在此客戶端上的實際行為相同)。
         var cameraSceneUpdateAddr = "48 ?? ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? F6 81 F0 ?? ?? ?? ?? 48 8B ??";
-        _cameraSceneUpdateHook = NativeBinding.ScanHook<CameraSceneUpdate>(scanner, hooking, cameraSceneUpdateAddr, CameraSceneUpdateDetour, "場景攝影機更新 CameraSceneUpdate");
+        _cameraSceneUpdateHook = NativeBinding.CreateHook<CameraSceneUpdate>(hooking,
+            NativeBinding.ScanAmbiguous(scanner, cameraSceneUpdateAddr, "場景攝影機更新 CameraSceneUpdate", offlineHitCount: 2),
+            CameraSceneUpdateDetour, "場景攝影機更新 CameraSceneUpdate");
 
         var cameraMatrixLoadAddr = NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 48 8B 93 90 02 ?? ?? 48 8D 4C 24 40", "攝影機矩陣載入 CameraMatrixLoad");
         _cameraMatrixLoad = NativeBinding.GetDelegate<CameraMatrixLoadDelegate>(cameraMatrixLoadAddr, "攝影機矩陣載入 CameraMatrixLoad");

@@ -67,7 +67,18 @@ public unsafe class LightingService : IDisposable
     private readonly ComponentSet<IGameLight> _spawnedLights = [];
     private readonly ComponentSet<LightEntity> _lightEntities = [];
 
-    public unsafe EventGPoseControllerEX* CurrentGPoseState => (EventGPoseControllerEX*)&EventFramework.Instance()->EventSceneModule.EventGPoseController;
+    // EventFramework.Instance() 可能為 null;對 null 取欄位位址不會當場崩,但回傳的指標一解參考就是 AVE。
+    public unsafe EventGPoseControllerEX* CurrentGPoseState
+    {
+        get
+        {
+            var eventFramework = EventFramework.Instance();
+            if(eventFramework == null)
+                return null;
+
+            return (EventGPoseControllerEX*)&eventFramework->EventSceneModule.EventGPoseController;
+        }
+    }
 
     public int SpawnedLightEntitiesCount => _lightEntities.ActiveCount;
     public List<LightEntity> SpawnedLightEntities => [.. _lightEntities];
@@ -98,7 +109,9 @@ public unsafe class LightingService : IDisposable
         var updateGameLightTypeRangeAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8D 55", "光源:類型/範圍更新");
         _updateGameLightRange = (delegate* unmanaged<LightRenderObject*, char, void>)updateGameLightTypeRangeAddress;
 
-        var updateGameLightCullingAddress = NativeBinding.Scan(sigScanner, "48 89 5C 24 ?? 57 48 83 EC 40 48 8B B9 ?? ?? ?? ??", "光源:剔除更新 UpdateCulling");
+        // 上游把位移常數整個 wildcard 掉,在台服有 4 個命中(另外三支讀的是 [rcx+0x250] / [rcx+0x268],
+        // 屬於別的類別)。把 0x80 這個位移寫死之後在台服是唯一命中,解出來與原本取到的第一個命中相同。
+        var updateGameLightCullingAddress = NativeBinding.Scan(sigScanner, "48 89 5C 24 ?? 57 48 83 EC 40 48 8B B9 80 00 00 00", "光源:剔除更新 UpdateCulling");
         _updateGameLightCulling = (delegate* unmanaged<GameLight*, void>)updateGameLightCullingAddress;
 
         var updateGameLightMaterialAddress = NativeBinding.Scan(sigScanner, "40 53 48 83 EC 20 0F B6 81 ?? ?? ?? ?? 48 8B D9 A8 04 75 45 0C 04 B2 05", "光源:材質更新 UpdateMaterial");
@@ -528,7 +541,11 @@ public struct EventGPoseControllerEX
 
     [FieldOffset(0x0E0)] public unsafe fixed ulong Lights[3];
 
-    public unsafe GameLight* GetLight(uint index) => (GameLight*)Lights[index];
+    // 🔴 Lights 是 fixed ulong[3]。上游沒有邊界檢查,index >= 3 會讀到陣列外的位元組
+    //    再當成指標解參考 —— 那是 AccessViolation,try/catch 攔不到。
+    public const uint LightCount = 3;
+
+    public unsafe GameLight* GetLight(uint index) => index < LightCount ? (GameLight*)Lights[index] : null;
 }
 
 public class LightData

@@ -45,7 +45,6 @@ public class ActorAppearanceService : IDisposable
     private unsafe delegate nint UpdateTintDelegate(nint charaBase, nint tint);
     private readonly Hook<UpdateTintDelegate>? _updateTintHook;
 
-    private unsafe delegate* unmanaged<DrawDataContainer*, ushort, ushort, void> _setFacewear;
 
     public bool CanTint => _configurationService.Configuration.Appearance.EnableTinting;
 
@@ -82,8 +81,10 @@ public class ActorAppearanceService : IDisposable
             updateTintHookAddress = (nint)Marshal.ReadInt64(charaBaseVTable + 0xC0);
         _updateTintHook = NativeBinding.CreateHook<UpdateTintDelegate>(hooks, updateTintHookAddress, UpdateTintDetour, "角色染色 UpdateTint");
 
-        var setFacewearAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? FF C3 48 8D ?? ?? ?? ?? ?? ?? ?? 0F", "臉部裝飾 SetFacewear");
-        _setFacewear = (delegate* unmanaged<DrawDataContainer*, ushort, ushort, void>)setFacewearAddress;
+        // 上游自帶的 SetFacewear 特徵碼在台服有 2 個命中(離線稽核),其中一支的簽章根本不同
+        // (吃 xmm3 浮點參數),取錯就是把結構指標餵給不相干的函式。
+        // FFXIVClientStructs 的 DrawDataContainer.SetGlasses 有自己的特徵碼,離線驗證為唯一命中,
+        // 且解出來就是上游這條特徵碼第一個命中所指的同一支函式 —— 改用它,歧義直接消失。
     }
 
     //
@@ -215,8 +216,7 @@ public class ActorAppearanceService : IDisposable
                     }
                     else
                     {
-                        if(_setFacewear != null)
-                            _setFacewear(&native->DrawData, 0, appearance.Facewear);
+                        native->DrawData.SetGlasses(0, appearance.Facewear);
                     }
                 }
             }

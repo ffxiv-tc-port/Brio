@@ -1,7 +1,9 @@
-﻿using Brio.Game.Actor.Appearance;
+﻿using Brio.Core;
+using Brio.Game.Actor.Appearance;
 using Brio.Resources.Extra;
 using Brio.Resources.Sheets;
 using Dalamud.Plugin.Services;
+using Lumina.Excel;
 using Lumina.Excel.Sheets;
 using System.Collections.Generic;
 using System.Linq;
@@ -47,56 +49,80 @@ public class GameDataProvider
     {
         Instance = this;
 
-        TerritoryTypes = dataManager.GetExcelSheet<TerritoryType>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        TerritoryTypes = SafeSheet<TerritoryType>(dataManager, "TerritoryType");
 
-        Weathers = dataManager.GetExcelSheet<Weather>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Weathers = SafeSheet<Weather>(dataManager, "Weather");
 
-        WeatherRates = dataManager.GetExcelSheet<WeatherRate>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        WeatherRates = SafeSheet<WeatherRate>(dataManager, "WeatherRate");
 
-        Companions = dataManager.GetExcelSheet<Companion>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Companions = SafeSheet<Companion>(dataManager, "Companion");
 
-        Ornaments = dataManager.GetExcelSheet<Ornament>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Ornaments = SafeSheet<Ornament>(dataManager, "Ornament");
 
-        Mounts = dataManager.GetExcelSheet<Mount>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Mounts = SafeSheet<Mount>(dataManager, "Mount");
 
-        Festivals = dataManager.GetExcelSheet<Festival>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Festivals = SafeSheet<Festival>(dataManager, "Festival");
 
-        Statuses = dataManager.GetExcelSheet<Status>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Statuses = SafeSheet<Status>(dataManager, "Status");
 
-        ActionTimelines = dataManager.GetExcelSheet<BrioActionTimeline>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        ActionTimelines = SafeSheet<BrioActionTimeline>(dataManager, "BrioActionTimeline");
 
-        Emotes = dataManager.GetExcelSheet<Emote>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Emotes = SafeSheet<Emote>(dataManager, "Emote");
 
-        Actions = dataManager.GetExcelSheet<Action>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Actions = SafeSheet<Action>(dataManager, "Action");
 
-        ENpcBases = dataManager.GetExcelSheet<ENpcBase>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        ENpcBases = SafeSheet<ENpcBase>(dataManager, "ENpcBase");
 
-        ENpcResidents = dataManager.GetExcelSheet<ENpcResident>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        ENpcResidents = SafeSheet<ENpcResident>(dataManager, "ENpcResident");
 
-        BNpcBases = dataManager.GetExcelSheet<BNpcBase>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        BNpcBases = SafeSheet<BNpcBase>(dataManager, "BNpcBase");
 
-        BNpcCustomizations = dataManager.GetExcelSheet<BNpcCustomize>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        BNpcCustomizations = SafeSheet<BNpcCustomize>(dataManager, "BNpcCustomize");
 
-        BNpcNames = dataManager.GetExcelSheet<BNpcName>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        BNpcNames = SafeSheet<BNpcName>(dataManager, "BNpcName");
 
-        NpcEquips = dataManager.GetExcelSheet<NpcEquip>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        NpcEquips = SafeSheet<NpcEquip>(dataManager, "NpcEquip");
 
-        Stains = dataManager.GetExcelSheet<Stain>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Stains = SafeSheet<Stain>(dataManager, "Stain");
 
-        CharaMakeCustomizations = dataManager.GetExcelSheet<CharaMakeCustomize>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        CharaMakeCustomizations = SafeSheet<CharaMakeCustomize>(dataManager, "CharaMakeCustomize");
 
-        CharaMakeTypes = dataManager.GetExcelSheet<BrioCharaMakeType>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        CharaMakeTypes = SafeSheet<BrioCharaMakeType>(dataManager, "BrioCharaMakeType");
 
-        HairMakeTypes = dataManager.GetExcelSheet<BrioHairMakeType>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        HairMakeTypes = SafeSheet<BrioHairMakeType>(dataManager, "BrioHairMakeType");
 
-        Items = dataManager.GetExcelSheet<Item>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Items = SafeSheet<Item>(dataManager, "Item");
 
-        Glasses = dataManager.GetExcelSheet<Glasses>()!.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+        Glasses = SafeSheet<Glasses>(dataManager, "Glasses");
 
         HumanData = new HumanData(dataManager.GetFile("chara/xls/charamake/human.cmp")!.Data);
 
         ModelDatabase = new(_resourceProvider);
 
         DataManager = dataManager;
+    }
+
+    /// <summary>
+    /// 讀一張 Excel 表並轉成字典。台服的表集合與國際服不同,缺表/欄位對不上時上游會直接
+    /// NullReferenceException,而 GameDataProvider 是 DI 單例 ⇒ 整個外掛載不起來。
+    /// 這裡改成:記一筆 Information 級診斷,回空字典,讓其餘功能照常運作。
+    /// </summary>
+    private static IReadOnlyDictionary<uint, T> SafeSheet<T>(IDataManager dataManager, string label)
+        where T : struct, IExcelRow<T>
+    {
+        try
+        {
+            var sheet = dataManager.GetExcelSheet<T>();
+            if(sheet is not null)
+                return sheet.ToDictionary(x => x.RowId, x => x).AsReadOnly();
+
+            NativeBinding.Fail($"遊戲資料表 {label}", "本客戶端沒有這張表", "遊戲資料");
+        }
+        catch(System.Exception ex)
+        {
+            NativeBinding.Fail($"遊戲資料表 {label}", $"讀取失敗:{ex.Message}", "遊戲資料");
+        }
+
+        return new Dictionary<uint, T>().AsReadOnly();
     }
 }

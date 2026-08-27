@@ -313,7 +313,11 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
         string preview = "None";
         if(lipsOverride != 0)
-            preview = GameDataProvider.Instance.ActionTimelines[lipsOverride].Key.ToString();
+            // IReadOnlyDictionary 的裸索引器:台服若沒有這個 row 會擲 KeyNotFoundException,
+            // 而這裡在 ImGui 繪製迴圈內 ⇒ 會炸掉整個 Brio UI。
+            preview = GameDataProvider.Instance.ActionTimelines.TryGetValue(lipsOverride, out var lipsTimeline)
+                ? lipsTimeline.Key.ToString()
+                : $"#{lipsOverride}";
 
         ImGui.SetNextItemWidth(MaxItemWidth);
         using(var combo = ImRaii.Combo("###lips", preview))
@@ -327,7 +331,8 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
                 for(uint i = 0x272; i <= 0x272 + 8; ++i)
                 {
-                    var entry = GameDataProvider.Instance.ActionTimelines[i];
+                    if(GameDataProvider.Instance.ActionTimelines.TryGetValue(i, out var entry) == false)
+                    continue;
                     bool selected = lipsOverride == i;
                     if(ImGui.Selectable($"{entry.Key} ({i})", selected))
                     {

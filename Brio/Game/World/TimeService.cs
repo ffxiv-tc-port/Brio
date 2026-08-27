@@ -98,8 +98,13 @@ public class TimeService : IDisposable
         _gPoseService = gPoseService;
         _configurationService = configurationService;
 
-        _updateEorzeaTimeHook = NativeBinding.ScanHook<UpdateEorzeaTimeDelegate>(scanner, hooking,
+        // ⚠️ 台服上這條特徵碼有 2 個命中,兩支函式的指令序列逐位元組相同(呼叫的下游也是同一批),
+        //    離線無法分辨哪一支才是艾歐澤亞時間更新。取第一個 —— 取錯的後果是「凍結時間沒作用」,
+        //    不會崩(detour 本身什麼都不做,委派簽章對兩支都成立)。
+        var eorzeaTimeAddress = NativeBinding.ScanAmbiguous(scanner,
             "48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 48 8B DA 48 81 C1 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C",
+            "凍結艾歐澤亞時間 UpdateEorzeaTime", offlineHitCount: 2);
+        _updateEorzeaTimeHook = NativeBinding.CreateHook<UpdateEorzeaTimeDelegate>(hooking, eorzeaTimeAddress,
             UpdateEorzeaTime, "凍結艾歐澤亞時間 UpdateEorzeaTime", enable: false);
 
         _clientState.TerritoryChanged += OnTerritoryChanged;

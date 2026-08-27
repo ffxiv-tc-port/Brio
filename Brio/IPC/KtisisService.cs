@@ -1,6 +1,7 @@
 ﻿using Brio.Config;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
+using System;
 
 namespace Brio.IPC;
 
@@ -16,8 +17,22 @@ public class KtisisService : BrioIPC
 
     public override int APIMinor => 0;
 
+    // 對方外掛不存在時 InvokeFunc() 會擲 IpcNotReadyError,空條件運算子擋不到
+    // (訂閱物件本身一定非 null,擲的是 InvokeFunc 內部)。
     public override (int Major, int Minor) GetAPIVersion()
-    => _ktisisApiVersion?.InvokeFunc() ?? (0, 0);
+    {
+        try
+        {
+            if(_ktisisApiVersion is null || _ktisisApiVersion.HasFunction == false)
+                return (0, 0);
+
+            return _ktisisApiVersion.InvokeFunc();
+        }
+        catch(Exception)
+        {
+            return (0, 0);
+        }
+    }
 
     public override IDalamudPluginInterface GetPluginInterface()
         => _pluginInterface;

@@ -68,6 +68,25 @@ public static class NativeBinding
         }
     }
 
+    /// <summary>
+    /// 給「離線稽核時在本客戶端有多個命中、而且無法分辨哪一個才對」的特徵碼用。
+    /// 行為與 <see cref="Scan"/> 相同(Dalamud 取第一個命中),但會在載入時明白記一筆,
+    /// 這樣「這個功能沒作用」就能立刻對應到「當初就知道它有歧義」,而不是重新查一遍。
+    /// </summary>
+    /// <param name="offlineHitCount">離線對台服執行檔掃描到的命中數。</param>
+    public static nint ScanAmbiguous(ISigScanner scanner, string signature, string purpose, int offlineHitCount)
+    {
+        var address = Scan(scanner, signature, purpose);
+        if(address != nint.Zero)
+        {
+            Brio.Log.Information(
+                $"[TC] 特徵碼有歧義:{purpose} —— 離線稽核在台服執行檔上有 {offlineHitCount} 個命中," +
+                "取第一個。此功能若行為異常,請連同本行一起回報。");
+        }
+
+        return address;
+    }
+
     /// <summary>掃描 + 建立 hook 的一次性組合。</summary>
     public static Hook<T>? ScanHook<T>(ISigScanner scanner, IGameInteropProvider provider, string signature, T detour, string purpose, bool enable = true)
         where T : Delegate
@@ -92,10 +111,10 @@ public static class NativeBinding
         }
     }
 
-    /// <summary>記錄一個非特徵碼來源的繫結失敗(例如 vtable 槽解不出來)。</summary>
-    public static void Fail(string purpose, string reason)
+    /// <summary>記錄一個非特徵碼來源的繫結失敗(例如 vtable 槽解不出來、遊戲資料表缺失)。</summary>
+    public static void Fail(string purpose, string reason, string kind = "原生繫結")
     {
-        var line = $"[TC] 原生繫結失效:{purpose} —— {reason}。相關功能已停用,外掛其餘部分仍可使用。";
+        var line = $"[TC] {kind}失效:{purpose} —— {reason}。相關功能已停用,外掛其餘部分仍可使用。";
         lock(_failures)
         {
             if(!_failures.Contains(purpose))
