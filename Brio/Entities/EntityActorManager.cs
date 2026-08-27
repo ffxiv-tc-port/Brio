@@ -49,7 +49,17 @@ public unsafe class EntityActorManager : IDisposable
     {
         foreach(var go in _objects)
         {
-            AttachActor(go, _actorContainerEntity);
+            // 🔴 IObjectTable 的索引子/列舉回傳的是**每個槽預先配置、每次讀取就地改寫 Address**
+            //    的共用包裝物件(Dalamud ObjectTable.CachedEntry.Update)。
+            //    ActorEntity 會把這個物件長期持有,而 EntityId 又是在建構當下由 Address 字串化而來
+            //    ⇒ 之後只要有人讀同一個槽,已存的 ActorEntity.GameObject.Address 就會靜默指向別人,
+            //    但它的 EntityId 還停在舊位址(對不上 ⇒ 移除不掉,而姿勢寫入會寫到別的角色身上)。
+            //    CreateObjectReference 會配一個獨立實例,與 OnCharacterInitialized 走的是同一條路。
+            var owned = _objects.CreateObjectReference(go.Address);
+            if(owned is null)
+                continue;
+
+            AttachActor(owned, _actorContainerEntity);
         }
     }
 
