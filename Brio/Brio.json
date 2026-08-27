@@ -1,24 +1,27 @@
-﻿{
+{
   "Author": "Asgard, Minmoose and Contributors",
-  "Name": "Brio",
+  "Name": "Brio 集體動作姿勢編輯",
   "InternalName": "Brio",
   "AssemblyVersion": "0.0.0.1",
-  "Description": "Brio is suite of tools that gives you advanced control to edit and pose actors during GPose.\n- Advanced actor posing \n\t- While animating\n\t- While animating\n\t- Overlay and graphical posing modes\n- Creation of up to 239 G-Pose actors\n- Creation of custom lights\n- Supports integration with Penumbra & Glamourer\n- Offline import and export of MCDF files onto G-Pose actors\n- Play XAT .xcp camera files\n- Play/Blend animations of GPose actors\n- Control Time/Weather in both the Overworld and GPose\n- Change the active festivals and apply up to 4 at once\n- Add/Remove Status Effects of GPose actors",
+  "Description": "在集體動作(GPose)中對角色與 NPC 做進階的姿勢、表情與動畫編輯。\r\n\r\n主要用途:進入集體動作後在 Brio 的角色清單選一個對象,用「姿勢」視窗的臉部頁調整表情骨骼,\r\n或用「動畫時間軸」視窗換嘴型與動畫。也可以生成額外的可擺姿角色、自訂光源、\r\n控制時間與天氣、播放 XAT 攝影機檔。\r\n\r\n台服移植版與上游的差異:\r\n- 基底為上游 v0.6.1.1(最後一版使用 API13/net9 的標籤),之後的版本已改用 API14/15 與 net10,台服跑不動。\r\n- 所有原生特徵碼改走閘門:比對不到時只停用該項功能並在日誌留一筆訊息,不會再讓整個外掛載入失敗。\r\n- 動畫時間軸資料表(ActionTimeline)的欄位布局依台服客戶端修正(台服的旗標欄位位置與國際服差一個位元組)。\r\n- 遊戲資料表讀取全面加上防護:台服缺少的表會退成空清單,不再讓外掛整個掛掉。\r\n- 角色清單改用獨立的物件參照,避免跨幀共用同一個包裝物件而把姿勢寫到別的角色身上。\r\n- 光源與物件表的索引加上邊界檢查。\r\n- 未安裝 Penumbra、Glamourer、Customize+、Mare 時一律靜默略過相關整合(表情與姿勢功能不需要它們)。\r\n- 介面只翻譯主視窗與設定分頁;姿勢/骨骼/動畫的內部用語維持英文,那些與社群教學一一對應,翻了反而對不上。",
   "ApplicableVersion": "any",
   "Tags": [
     "gpose",
     "brio",
     "posing",
-    "animation"
+    "animation",
+    "集體動作",
+    "姿勢",
+    "表情"
   ],
-  "DownloadCount": 646779,
   "DalamudApiLevel": 13,
   "LoadRequiredState": 0,
   "LoadSync": false,
   "CanUnloadAsync": false,
   "LoadPriority": 0,
-  "IconUrl": "https://raw.githubusercontent.com/Etheirys/Brio/main/Resources/Images/BrioIcon.png",
-  "Punchline": "Enhanced GPosing! A utility for improving the G-Pose experience in FFXIV.",
-  "Changelog": "", 
-  "AcceptsFeedback": true
+  "IconUrl": "https://raw.githubusercontent.com/ffxiv-tc-port/Brio/tc-7.20/Resources/Images/BrioIcon.png",
+  "Punchline": "在集體動作(GPose)中編輯角色與 NPC 的姿勢、表情與動畫。",
+  "Changelog": "",
+  "AcceptsFeedback": true,
+  "RepoUrl": "https://github.com/ffxiv-tc-port/Brio"
 }

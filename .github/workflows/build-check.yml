@@ -1,0 +1,36 @@
+name: Build Check
+
+on:
+  push:
+    branches:
+      - 'tc-7.20'
+    tags-ignore:
+      - 'v*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 9.x
+      - name: Download Dalamud (pinned TC-compatible build)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/ffxiv-tc-port/DalamudPluginsTC/releases/download/dalamud-pin-v13.0.0.16/dalamud-api13-net9.zip -OutFile dalamud-pinned.zip
+          Expand-Archive -Force dalamud-pinned.zip "$env:AppData\FFXIVSimpleLauncher\Dalamud\Injector\"
+          Expand-Archive -Force dalamud-pinned.zip "$env:AppData\xivlauncher\Addon\Hooks\dev\"
+      - name: Build with dotnet
+        run: dotnet build --configuration Release Brio/Brio.csproj -p:DalamudLibPath="$env:AppData\FFXIVSimpleLauncher\Dalamud\Injector\"
+
+# 本機實測（2026-08-28）：直接建 Brio/Brio.csproj 的 `->` 行是
+#   Brio\Brio\bin\Release\Brio.dll
+# 打包產物在 Brio/bin/Release/Brio/{latest.zip,Brio.json}（DalamudPackager.targets 的 MakeZip 已改成 true）。
+# 🔴 bin/x64/ 不存在——上游的 release-brio.yml 用的是 `dotnet build Brio.sln` 才會產生 bin/x64/Release，
+#    我們建的是 csproj，路徑不同。release.yml 的路徑要跟這裡一致，抄上游會在 Zip 步驟找不到目錄。

@@ -78,7 +78,7 @@ public class MainWindow : Window, IDisposable
         if(_gPoseService.IsGPosing == false)
         {
             using(ImRaii.PushColor(ImGuiCol.Text, UIConstants.GizmoRed))
-                ImGui.Text("Open GPose to use Brio!");
+                ImGui.Text("請先進入集體動作(GPose)才能使用 Brio!");
         }
 
         var rootEntity = _entityManager.RootEntity;
@@ -95,7 +95,7 @@ public class MainWindow : Window, IDisposable
                 if(_entityManager.SelectedEntityIds.Count > 1)
                 {
                     using var color = ImRaii.PushColor(ImGuiCol.Text, ThemeManager.CurrentTheme.Accent.AccentColor);
-                    ImGui.Text($"{_entityManager.SelectedEntityIds.Count} selected");
+                    ImGui.Text($"已選取 {_entityManager.SelectedEntityIds.Count} 個");
                 }
             }
         }
@@ -127,11 +127,11 @@ public class MainWindow : Window, IDisposable
                 ImGui.SetCursorPos(startPos);
             }
 
-            if(ImBrio.Button("Project", FontAwesomeIcon.FolderOpen, new Vector2(line1Width, 0), centerTest: true))
+            if(ImBrio.Button("專案", FontAwesomeIcon.FolderOpen, new Vector2(line1Width, 0), centerTest: true))
                 ImGui.OpenPopup("DrawProjectPopup");
 
             ImGui.SameLine();
-            if(ImBrio.Button("Library", FontAwesomeIcon.Book, new Vector2(line1Width, 0), centerTest: true))
+            if(ImBrio.Button("資料庫", FontAwesomeIcon.Book, new Vector2(line1Width, 0), centerTest: true))
                 _libraryWindow.Toggle();
         }
 
@@ -140,14 +140,14 @@ public class MainWindow : Window, IDisposable
             _infoWindow.Toggle();
 
         if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Information & Changelog");
+            ImGui.SetTooltip("資訊與更新記錄");
 
         ImGui.SameLine();
         if(ImBrio.FontIconButton(FontAwesomeIcon.Cog, new(buttonWidths, 0)))
             _settingsWindow.Toggle();
 
         if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Settings");
+            ImGui.SetTooltip("設定");
 
         //
 

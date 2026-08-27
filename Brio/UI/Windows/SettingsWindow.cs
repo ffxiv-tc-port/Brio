@@ -83,14 +83,14 @@ public class SettingsWindow : Window
             {
                 DrawLibrarySection();
 
-                if(ImBrio.Button("Close", FontAwesomeIcon.Times, new Vector2(100, 0)))
+                if(ImBrio.Button("關閉", FontAwesomeIcon.Times, new Vector2(100, 0)))
                 {
                     IsOpen = false;
                 }
             }
             else
             {
-                ImBrio.ButtonSelectorStrip("settings_filters_selector", new Vector2(ImBrio.GetRemainingWidth(), ImBrio.GetLineHeight()), ref selected, ["General", "IPC", "Posing", "Library", "Auto-Save", "Input", "Advanced"]);
+                ImBrio.ButtonSelectorStrip("settings_filters_selector", new Vector2(ImBrio.GetRemainingWidth(), ImBrio.GetLineHeight()), ref selected, ["一般", "外掛整合", "姿勢", "資料庫", "自動存檔", "按鍵", "進階"]);
 
                 using(var child = ImRaii.Child("###settingsPane"))
                 {
