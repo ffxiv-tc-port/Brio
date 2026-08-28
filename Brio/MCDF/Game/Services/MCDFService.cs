@@ -31,6 +31,7 @@ public class MCDFService : IDisposable
     public static readonly IImmutableList<string> AllowedFileExtensions = [".mdl", ".tex", ".mtrl", ".tmb", ".pap", ".avfx", ".atex", ".sklb", ".eid", ".phyb", ".pbd", ".scd", ".skp", ".shpk", ".kdb"];
 
     private readonly IFramework _framework;
+    private readonly IObjectTable _objectTable;
     private readonly TargetService _targetService;
     private readonly ConfigurationService _configurationService;
     private readonly FileCacheService _fileCacheService;
@@ -63,10 +64,11 @@ public class MCDFService : IDisposable
 
     //private int _globalFileCounter = 0;
 
-    public MCDFService(IFramework framework, CharacterHandlerService characterHandlerService, GPoseService gPoseService, ActorAppearanceService actorAppearanceService, ConfigurationService configurationService, FileCacheService fileCacheService, TargetService targetService, ActorRedrawService actorRedrawService, DalamudService dalamudService,
+    public MCDFService(IFramework framework, IObjectTable objectTable, CharacterHandlerService characterHandlerService, GPoseService gPoseService, ActorAppearanceService actorAppearanceService, ConfigurationService configurationService, FileCacheService fileCacheService, TargetService targetService, ActorRedrawService actorRedrawService, DalamudService dalamudService,
         PenumbraService penumbraService, TransientResourceService transientResourceService, GlamourerService glamourerService, CustomizePlusService customizePlusService)
     {
         _framework = framework;
+        _objectTable = objectTable;
         _configurationService = configurationService;
         _fileCacheService = fileCacheService;
         _targetService = targetService;
@@ -170,7 +172,7 @@ public class MCDFService : IDisposable
                 DataApplicationProgress = "Applying MCDF data";
                 Brio.Log.Debug($"{DataApplicationProgress}");
 
-                await ApplyDataAsync(applicationId, (name, gameObjectId, gameObject), isSelf, charaFile.FilePath,
+                await ApplyDataAsync(applicationId, (name, gameObjectId), isSelf, charaFile.FilePath,
                     extractedFiles, charaFile.CharaFileData.ManipulationData, charaFile.CharaFileData.GlamourerData,
                     charaFile.CharaFileData.CustomizePlusData, CancellationToken.None).ConfigureAwait(false);
             }
@@ -262,67 +264,157 @@ public class MCDFService : IDisposable
         return gamePathToFilePath;
     }
 
-    private async Task ApplyDataAsync(Guid applicationId, (string Name, ulong GameObjectId, IGameObject GameObject) tempHandler, bool isSelf, string UID,
+    // 這條路徑從頭到尾有數秒的等待(3 秒 Delay 與兩次 redraw-and-wait),期間目標角色可能離開 GPose 或直接消失。
+    // 所以這裡只帶「名字 + GameObjectId」,不帶 IGameObject:每個 await 回來都用 id 重查一次物件表。
+    //  - SearchById 回傳的是 IObjectTable 共用的包裝實例(存取時就地改寫 Address,槽位空掉時連改寫都不做),
+    //    不能跨幀留著;因此在同一個 framework 回呼裡就用 CreateObjectReference 轉成獨立實例,只給接下來那一步用。
+    //  - 查不到就代表角色已經不在物件表裡 ⇒ 中止套用,走 finally 的既有還原路徑,不留半套狀態。
+    // ⚠️ AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到,所以只能靠不解參舊位址。
+    private async Task ApplyDataAsync(Guid applicationId, (string Name, ulong GameObjectId) tempHandler, bool isSelf, string UID,
         Dictionary<string, string> modPaths, string? manipData, string? glamourerData, string? customizeData, CancellationToken token)
     {
         Guid? cPlusId = null;
-        Guid penumbraCollection;
+        Guid? penumbraCollection = null;
+        bool actorLost = false;
+
+        // 以 id 重查目標,並在同一個 framework 回呼裡把物件索引一併讀出來(索引是值,可以安全帶出回呼)。
+        // 回傳的 IGameObject 是 CreateObjectReference 產生的獨立實例:Address 是這一刻凍結的,
+        // 不會被物件表的共用包裝改寫成別人 —— 但也只保證「緊接著的這一步」有效,不要跨下一個 await 留著。
+        async Task<(IGameObject? Actor, int Index)> ResolveActorAsync(string stage)
+        {
+            var resolved = await _framework.RunOnFrameworkThread<(IGameObject? Actor, int Index)>(() =>
+            {
+                if(tempHandler.GameObjectId == 0)
+                    return (null, 0);
+
+                var live = _objectTable.SearchById(tempHandler.GameObjectId);
+                if(live is null || live.Address == nint.Zero)
+                    return (null, 0);
+
+                return (_objectTable.CreateObjectReference(live.Address), (int)live.ObjectIndex);
+            }).ConfigureAwait(false);
+
+            if(resolved.Actor is null)
+                Brio.Log.Information($"角色已消失,取消 MCDF 套用(階段:{stage};角色「{tempHandler.Name}」,GameObjectId 0x{tempHandler.GameObjectId:X})");
+
+            return resolved;
+        }
+
         try
         {
             DataApplicationProgress = "Reverting previous Application";
 
-            await _penumbraService.Redraw(tempHandler.GameObject);
-            await _actorRedrawService.RedrawAndWait(tempHandler.GameObject);
+            var (actor, _) = await ResolveActorAsync("還原先前的套用").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
 
-            _glamourerService.UnlockAndRevertCharacter(tempHandler.GameObject);
+            await _penumbraService.Redraw(actor);
+
+            (actor, _) = await ResolveActorAsync("重繪並等待").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
+
+            await _actorRedrawService.RedrawAndWait(actor);
+
+            (actor, _) = await ResolveActorAsync("還原 Glamourer 與 Customize+").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
+
+            _glamourerService.UnlockAndRevertCharacter(actor);
             _glamourerService.UnlockAndRevertCharacterByName(tempHandler.Name);
 
-            _customizePlusService.RemoveTemporaryProfile(tempHandler.GameObject);
+            _customizePlusService.RemoveTemporaryProfile(actor);
 
             await Task.Delay(TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
 
             DataApplicationProgress = "Applying Penumbra information";
 
-            var idx = await _framework.RunOnFrameworkThread(() => tempHandler.GameObject?.ObjectIndex).ConfigureAwait(false) ?? 0;
+            int idx;
+            (actor, idx) = await ResolveActorAsync("套用 Penumbra 資料").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
+
             Brio.Log.Debug($"{DataApplicationProgress} idx:{idx}");
 
             penumbraCollection = await _penumbraService.CreateTemporaryCollectionAsync($"Brio_{idx}").ConfigureAwait(false);
 
-            await _penumbraService.AssignTemporaryCollectionAsync(penumbraCollection, idx).ConfigureAwait(false);
-            await _penumbraService.SetTemporaryModsAsync(applicationId, penumbraCollection, modPaths).ConfigureAwait(false);
-            await _penumbraService.SetManipulationDataAsync(applicationId, penumbraCollection, manipData ?? string.Empty).ConfigureAwait(false);
+            await _penumbraService.AssignTemporaryCollectionAsync(penumbraCollection.Value, idx).ConfigureAwait(false);
+            await _penumbraService.SetTemporaryModsAsync(applicationId, penumbraCollection.Value, modPaths).ConfigureAwait(false);
+            await _penumbraService.SetManipulationDataAsync(applicationId, penumbraCollection.Value, manipData ?? string.Empty).ConfigureAwait(false);
 
             DataApplicationProgress = "Applying Glamourer and redrawing Character";
             Brio.Log.Debug($"{DataApplicationProgress}");
 
-            _glamourerService.ApplyAllAsync(tempHandler.GameObject, glamourerData, applicationId);
+            (actor, _) = await ResolveActorAsync("套用 Glamourer 並重繪").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
 
-            await _actorRedrawService.RedrawAndWait(tempHandler.GameObject);
+            _glamourerService.ApplyAllAsync(actor, glamourerData, applicationId);
 
-            await _penumbraService.RemoveTemporaryCollectionAsync(applicationId, penumbraCollection).ConfigureAwait(false);
+            await _actorRedrawService.RedrawAndWait(actor);
+
+            await _penumbraService.RemoveTemporaryCollectionAsync(applicationId, penumbraCollection.Value).ConfigureAwait(false);
+            penumbraCollection = null;
 
             DataApplicationProgress = "Applying Customize+ data";
+
+            (actor, _) = await ResolveActorAsync("套用 Customize+ 資料").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
 
             if(!string.IsNullOrEmpty(customizeData))
             {
                 Brio.Log.Debug($"{DataApplicationProgress}");
-                cPlusId = await _customizePlusService.SetBodyScaleAsync(tempHandler.GameObject, customizeData).ConfigureAwait(false);
+                cPlusId = await _customizePlusService.SetBodyScaleAsync(actor, customizeData).ConfigureAwait(false);
                 //Brio.Log.Warning("LOOK AT ME I' M MR MESEECKS {customizeData}");
                 //Brio.Log.Warning(customizeData);
             }
             else
             {
                 Brio.Log.Debug($"{DataApplicationProgress} IsNullOrEmpty");
-                cPlusId = await _customizePlusService.SetBodyScaleAsync(tempHandler.GameObject, Convert.ToBase64String(Encoding.UTF8.GetBytes("{}"))).ConfigureAwait(false);
+                cPlusId = await _customizePlusService.SetBodyScaleAsync(actor, Convert.ToBase64String(Encoding.UTF8.GetBytes("{}"))).ConfigureAwait(false);
             }
 
             _characterHandlerService.CharacterHandler.Add(new CharacterHolder(tempHandler.GameObjectId, cPlusId, tempHandler.Name));
         }
         finally
         {
-            if(token.IsCancellationRequested)
+            if(actorLost || token.IsCancellationRequested)
             {
                 DataApplicationProgress = "Application aborted. Reverting Character...";
+
+                // 已建立但還沒收掉的 Penumbra 暫時集合要拆掉,否則會留下孤兒集合(正常路徑上已經移除並設回 null)。
+                if(penumbraCollection.HasValue)
+                {
+                    try
+                    {
+                        await _penumbraService.RemoveTemporaryCollectionAsync(applicationId, penumbraCollection.Value).ConfigureAwait(false);
+                    }
+                    catch(Exception ex)
+                    {
+                        Brio.Log.Warning(ex, "取消 MCDF 套用時移除 Penumbra 暫時集合失敗");
+                    }
+                }
+
+                // 既有的還原路徑:holder 只帶 id,RevertMCDF 自己會重查物件表,查不到時退回以名稱還原 Glamourer。
                 await _characterHandlerService.RevertMCDF(new CharacterHolder(tempHandler.GameObjectId, cPlusId, tempHandler.Name)).ConfigureAwait(false);
             }
 
