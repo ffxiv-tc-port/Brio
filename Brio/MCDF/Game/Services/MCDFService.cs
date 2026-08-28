@@ -131,6 +131,10 @@ public class MCDFService : IDisposable
 
         var name = gameObject.Name.TextValue;
 
+        // 在這裡(物件確定還新鮮)就把身分抄走。之後整條套用流程有數秒的等待與重繪,
+        // 期間 IObjectTable 的共用包裝可能已經被改寫成別人,再讀 GameObjectId 就是錯的。
+        var gameObjectId = gameObject.GameObjectId;
+
         _currentApplicationCount++;
 
         await (McdfApplicationTask = Task.Run(async () =>
@@ -166,7 +170,7 @@ public class MCDFService : IDisposable
                 DataApplicationProgress = "Applying MCDF data";
                 Brio.Log.Debug($"{DataApplicationProgress}");
 
-                await ApplyDataAsync(applicationId, (name, gameObject), isSelf, charaFile.FilePath,
+                await ApplyDataAsync(applicationId, (name, gameObjectId, gameObject), isSelf, charaFile.FilePath,
                     extractedFiles, charaFile.CharaFileData.ManipulationData, charaFile.CharaFileData.GlamourerData,
                     charaFile.CharaFileData.CustomizePlusData, CancellationToken.None).ConfigureAwait(false);
             }
@@ -258,7 +262,7 @@ public class MCDFService : IDisposable
         return gamePathToFilePath;
     }
 
-    private async Task ApplyDataAsync(Guid applicationId, (string Name, IGameObject GameObject) tempHandler, bool isSelf, string UID,
+    private async Task ApplyDataAsync(Guid applicationId, (string Name, ulong GameObjectId, IGameObject GameObject) tempHandler, bool isSelf, string UID,
         Dictionary<string, string> modPaths, string? manipData, string? glamourerData, string? customizeData, CancellationToken token)
     {
         Guid? cPlusId = null;
@@ -312,14 +316,14 @@ public class MCDFService : IDisposable
                 cPlusId = await _customizePlusService.SetBodyScaleAsync(tempHandler.GameObject, Convert.ToBase64String(Encoding.UTF8.GetBytes("{}"))).ConfigureAwait(false);
             }
 
-            _characterHandlerService.CharacterHandler.Add(new CharacterHolder(tempHandler.GameObject, cPlusId, tempHandler.Name));
+            _characterHandlerService.CharacterHandler.Add(new CharacterHolder(tempHandler.GameObjectId, cPlusId, tempHandler.Name));
         }
         finally
         {
             if(token.IsCancellationRequested)
             {
                 DataApplicationProgress = "Application aborted. Reverting Character...";
-                await _characterHandlerService.RevertMCDF(new CharacterHolder(tempHandler.GameObject, cPlusId, tempHandler.Name)).ConfigureAwait(false);
+                await _characterHandlerService.RevertMCDF(new CharacterHolder(tempHandler.GameObjectId, cPlusId, tempHandler.Name)).ConfigureAwait(false);
             }
 
             DataApplicationProgress = string.Empty;

@@ -28,7 +28,11 @@ public class TransientResourceService : IDisposable
     private readonly string[] _handledFileTypes = ["tmb", "pap", "avfx", "atex", "sklb", "eid", "phyb", "scd", "skp", "shpk", "kdb"];
     private readonly string[] _handledRecordingFileTypes = ["tex", "mdl", "mtrl"];
 
-    private readonly HashSet<(IGameObject GameObject, ObjectKind ObjectKind)> _playerRelatedPointers = [];
+    // 🔴 這裡以前存 IGameObject。IObjectTable 回傳的包裝是每個槽位×每種 kind 預配一個實例、
+    //    存取時就地改寫 Address(ObjectTable.CachedEntry.Update),跨幀持有會靜默換人或懸空。
+    //    這條路徑從頭到尾只把物件當作「位址這個鍵」用(_cachedFrameAddresses 也是位址鍵,
+    //    Penumbra 的資源載入回呼給的也是位址),所以直接存位址值,永不解參。
+    private readonly HashSet<(nint Address, ObjectKind ObjectKind)> _playerRelatedPointers = [];
     private ConcurrentDictionary<IntPtr, ObjectKind> _cachedFrameAddresses = [];
     private ConcurrentDictionary<ObjectKind, HashSet<string>>? _semiTransientResources = null;
 
@@ -252,7 +256,7 @@ public class TransientResourceService : IDisposable
 
     private void DalamudUtil_FrameworkUpdate()
     {
-        _cachedFrameAddresses = new(_playerRelatedPointers.Where(k => k.GameObject.Address != nint.Zero).ToDictionary(c => c.GameObject.Address, c => c.ObjectKind));
+        _cachedFrameAddresses = new(_playerRelatedPointers.Where(k => k.Address != nint.Zero).ToDictionary(c => c.Address, c => c.ObjectKind));
         lock(_cacheAdditionLock)
         {
             _cachedHandledPaths.Clear();
@@ -347,7 +351,8 @@ public class TransientResourceService : IDisposable
             TransientResources[objectKind] = transientResources;
         }
 
-        var owner = _playerRelatedPointers.FirstOrDefault(f => f.GameObject.Address == gameObjectAddress).GameObject;
+        var ownerEntry = _playerRelatedPointers.FirstOrDefault(f => f.Address == gameObjectAddress);
+        var hasOwner = ownerEntry.Address != nint.Zero;
         bool alreadyTransient = false;
 
         bool transientContains = transientResources.Contains(replacedGamePath);
@@ -366,15 +371,15 @@ public class TransientResourceService : IDisposable
                 bool isAdded = transientResources.Add(replacedGamePath);
                 if(isAdded)
                 {
-                    Brio.Log.Verbose("Adding {replacedGamePath} for {gameObject} ({filePath})", replacedGamePath, owner?.ToString() ?? gameObjectAddress.ToString("X"), filePath);
+                    Brio.Log.Verbose("Adding {replacedGamePath} for {gameObject} ({filePath})", replacedGamePath, gameObjectAddress.ToString("X"), filePath);
                     //SendTransients(gameObjectAddress, objectKind);
                 }
             }
         }
 
-        if(owner != null && IsTransientRecording)
+        if(hasOwner && IsTransientRecording)
         {
-            _recordedTransients.Add(new TransientRecord(owner, replacedGamePath, filePath, alreadyTransient) { AddTransient = !alreadyTransient });
+            _recordedTransients.Add(new TransientRecord(ownerEntry.Address, ownerEntry.ObjectKind, replacedGamePath, filePath, alreadyTransient) { AddTransient = !alreadyTransient });
         }
     }
 
@@ -435,15 +440,15 @@ public class TransientResourceService : IDisposable
         //foreach(var item in _recordedTransients)
         //{
         //    if(!item.AddTransient || item.AlreadyTransient) continue;
-        //    if(!TransientResources.TryGetValue(item.Owner.ObjectKind, out var transient))
+        //    if(!TransientResources.TryGetValue(item.OwnerObjectKind, out var transient))
         //    {
-        //        TransientResources[item.Owner.ObjectKind] = transient = [];
+        //        TransientResources[item.OwnerObjectKind] = transient = [];
         //    }
 
         //    Brio.Log.Verbose("Adding recorded: {gamePath} => {filePath}", item.GamePath, item.FilePath);
 
         //    transient.Add(item.GamePath);
-        //    addedTransients.Add(item.Owner.Address);
+        //    addedTransients.Add(item.OwnerAddress);
         //}
 
         //_recordedTransients.Clear();
@@ -463,7 +468,7 @@ public class TransientResourceService : IDisposable
 
     private CancellationTokenSource _sendTransientCts = new();
 
-    public record TransientRecord(IGameObject Owner, string GamePath, string FilePath, bool AlreadyTransient)
+    public record TransientRecord(nint OwnerAddress, ObjectKind OwnerObjectKind, string GamePath, string FilePath, bool AlreadyTransient)
     {
         public bool AddTransient { get; set; }
     }
