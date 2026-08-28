@@ -183,10 +183,12 @@ public class PosingGraphicalWindow : Window, IDisposable
     {
         const float buttonWidth = 28;
 
-        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 0), _physicsService.IsFreezeEnabled, hoverText: _physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics"))
+        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 0), _physicsService.IsFreezeEnabled))
         {
             _physicsService.FreezeToggle();
         }
+        ImBrio.AttachToolTip((_physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics")
+            + ImBrio.TooltipSeparator + PhysicsService.TcPatchWarning);
 
         ImGui.SameLine();
 

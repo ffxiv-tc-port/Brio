@@ -82,10 +82,12 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
     private void DrawHeder()
     {
-        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 25), _physicsService.IsFreezeEnabled, hoverText: _physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics"))
+        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 25), _physicsService.IsFreezeEnabled))
         {
             _physicsService.FreezeToggle();
         }
+        ImBrio.AttachToolTip((_physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics")
+            + ImBrio.TooltipSeparator + PhysicsService.TcPatchWarning);
 
         ImGui.SameLine();
 

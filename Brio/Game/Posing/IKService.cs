@@ -20,6 +20,24 @@ public unsafe class IKService : IDisposable
     private (nint Aligned, nint Unaligned) _ccdConstraintCtrAddr;
     private (nint Aligned, nint Unaligned) _twoJointSetupAddr;
 
+    private static bool _tcWarningLogged;
+
+    /// <summary>UI tooltip 與 log 共用的警語(繁中)。結構大小沒對台服驗過,使用者要先知道。</summary>
+    public const string TcWarning =
+        "實驗功能:IK 用到的 havok 結構大小(CCDIKConstraint / TwoJointIKSetup)尚未對台服客戶端驗證過。\n" +
+        "若台服的結構比外掛假設的小,解算時會寫超出配置範圍 —— 那是堆積毀損,不一定當場崩潰。\n" +
+        "使用後若遊戲出現異常,請關閉 IK 並回報。";
+
+    /// <summary>第一次啟用 IK 時印一次(Information 級,使用者的 LogLevel 2 收得到)。</summary>
+    public static void LogTcWarningOnce()
+    {
+        if(_tcWarningLogged)
+            return;
+        _tcWarningLogged = true;
+
+        Brio.Log.Information("[TC] Brio IK —— " + TcWarning.Replace("\n", " "));
+    }
+
     public IKService(ISigScanner scanner)
     {
         _ccdSolverCtr = (delegate* unmanaged<hkaCCDSolver*, int, float, void>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 48 8D 43 ?? 48 C7 43", "IK:CCD 解算器建構");

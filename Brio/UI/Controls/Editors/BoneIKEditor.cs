@@ -1,5 +1,6 @@
 ﻿using Brio.Capabilities.Posing;
 using Brio.Game.Posing;
+using Brio.UI.Controls.Stateless;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 
@@ -14,8 +15,12 @@ public class BoneIKEditor
 
         if(ImGui.Checkbox("Enabled", ref ik.Enabled))
         {
+            if(ik.Enabled)
+                IKService.LogTcWarningOnce();
+
             didChange |= true;
         }
+        ImBrio.AttachToolTip(IKService.TcWarning);
 
         using(ImRaii.Disabled(!ik.Enabled))
         {
