@@ -318,6 +318,24 @@ public class MCDFService : IDisposable
         // 以 id 重查目標,並在同一個 framework 回呼裡把物件索引一併讀出來(索引是值,可以安全帶出回呼)。
         // 回傳的 IGameObject 是 CreateObjectReference 產生的獨立實例:Address 是這一刻凍結的,
         // 不會被物件表的共用包裝改寫成別人 —— 但也只保證「緊接著的這一步」有效,不要跨下一個 await 留著。
+        //
+        // 📌 為什麼這裡用 SearchById 是安全的(2026-09-03 對台服 7.20 執行檔離線驗證,image base 0x140000000):
+        //    GameObject::GetGameObjectId 在 0x1408530E0,64 位元結果的高 4 位元組是「種類標籤」:
+        //      EntityId(+0x78)!= 0xE0000000              -> Id = EntityId,標籤 0
+        //      否則 BaseId(+0x7C)== 0                     -> Id = ObjectIndex(+0x8C) | (2 << 32)
+        //      否則 200 <= ObjectIndex <= 448(0x141632670)-> Id = ObjectIndex | (2 << 32)
+        //      否則                                        -> Id = BaseId | (1 << 32)
+        //    而 GPose 槽位(索引 200 起,ClientObjectManager 的配置迴圈上限 0xF0 ⇒ 200..439)的物件是由
+        //    0x1416320EB / 0x1416321D9 / 0x141631F95 建的,三處都寫死 EntityId = 0xE0000000、BaseId = 0
+        //    ⇒ GPose 目標的 id 一律是「索引 | 2<<32」。
+        //    ⇒ (1) 它永遠不會是 0,所以 Dalamud 對 id 0 直接回 null 那條(ObjectTable.cs:107-108)碰不到;
+        //       (2) 標籤在高位,所以它只可能跟另一個標籤 2 的 id 相等,而那是由物件表槽位號決定的
+        //           ⇒ 全表唯一,SearchById「回索引最小的第一個命中」不可能挑到別的角色。
+        //    ⚠️ 唯一在 200+ 範圍建物件卻不寫 0xE0000000 的是 0x141AC5E42(EntityId = 來源的 BaseId),
+        //       但它緊接著把 ObjectKind 設成 3(EventNpc),而 ApplyMCDF 的入口只收 ObjectKind.Player。
+        //    ⚠️ 離線證不到的部分:上面驗的是「建立時寫什麼」,不是「之後沒有人改寫 +0x78」。
+        //       真的有人改寫的話後果是套到別的角色(明顯的外觀錯誤),不是崩潰 ——
+        //       SearchById 拿到的位址來自這一幀的物件表,CreateObjectReference 解參的是活的物件。
         async Task<(IGameObject? Actor, int Index)> ResolveActorAsync(string stage)
         {
             var resolved = await _framework.RunOnFrameworkThread<(IGameObject? Actor, int Index)>(() =>
