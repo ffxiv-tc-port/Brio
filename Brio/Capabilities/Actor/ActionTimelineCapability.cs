@@ -121,6 +121,14 @@ public class ActionTimelineCapability : ActorCharacterCapability
         {
             unsafe
             {
+                // 🔴 這段是 4 幀之後才跑的。Character(= ActorEntity.GameObject)的 Address 是建構當下
+                //    凍結的,角色若已經消失就是懸空位址,Character.Native() 之後的每一次解參都會踩到
+                //    已釋放的記憶體 —— AccessViolationException 在 .NET Core 是 corrupted-state
+                //    exception,try/catch 攔不到,只能事前擋。IsGameObjectAlive 只讀物件表自己的指標
+                //    陣列(GetObjectAddress),不解參任何存下來的位址,是安全的存活檢查。
+                if(Actor.IsGameObjectAlive == false)
+                    return;
+
                 var drawObj = Character.Native()->GameObject.DrawObject;
                 if(drawObj == null)
                     return;
@@ -173,6 +181,10 @@ public class ActionTimelineCapability : ActorCharacterCapability
         {
             await _framework.RunOnTick(() =>
             {
+                // 同上:又過了 2 幀,SetOverallSpeedOverride 與 SpeedMultiplier 都會解參 Character.Native()。
+                if(Actor.IsGameObjectAlive == false)
+                    return;
+
                 SetOverallSpeedOverride(oldSpeed);
 
                 Brio.Log.Verbose($"SetOverallSpeedOverride {SpeedMultiplier}");

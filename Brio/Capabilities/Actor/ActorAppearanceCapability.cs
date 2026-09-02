@@ -418,6 +418,16 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     public unsafe void AttachWeapon()
     {
+        // 🔴 這支有四個呼叫端都是延後 5~10 幀的 RunOnTick 回呼(本檔 SetAppearance / Redraw、
+        //    ActorSpawnService.SpawnNewProp、SceneService.LoadProp)。Character(= ActorEntity.GameObject)
+        //    的 Address 是建構當下凍結的,角色在那幾幀之內消失就成了懸空位址,Character.Native() 之後
+        //    的解參與 PlayTimeline 寫入都會踩到已釋放的記憶體 —— AccessViolationException 在 .NET Core
+        //    是 corrupted-state exception,try/catch 攔不到。IsGameObjectAlive 只讀物件表自己的指標
+        //    陣列(GetObjectAddress),不解參任何存下來的位址,是安全的存活檢查。
+        //    擋在這裡一次,四個延後呼叫端就一起安全了。
+        if(Actor.IsGameObjectAlive == false)
+            return;
+
         Character.Native()->Timeline.TimelineSequencer.PlayTimeline(5616);
     }
 
