@@ -476,6 +476,53 @@ public unsafe class LightingService : IDisposable
 
     //
 
+    /// <summary>
+    /// 找出這盞光源在 <c>_lightEntities</c> 裡的槽位。找不到(從來沒有替它建過 UI 實體)時回 <c>false</c>。
+    ///
+    /// <para>
+    /// 🔴 兩支移除函式原本寫的是 <c>_lightEntities.Components[light.Index]</c>,但 <c>Index</c> 是
+    /// <c>_spawnedLights.Add()</c> 發的號碼、<c>EntityIndex</c> 才是 <c>_lightEntities.Add()</c> 發的。
+    /// 兩個 <see cref="ComponentSet{T}"/> 各自帶一份 <c>AvailableIndices</c> 空號佇列與
+    /// <c>NextAvailableIndex</c> 計數器 ⇒ <b>兩套互不相干的索引空間</b>,只有在每一次增與減都完美配對時
+    /// 才碰巧相同。一走到就永久錯開的路徑:三處「找不到 environment 實體」的 TODO 分支只往
+    /// <c>_spawnedLights</c> 加、不往 <c>_lightEntities</c> 加。另外兩支移除函式的
+    /// <c>_spawnedLights.Remove</c> 是同步的、<c>_lightEntities.Remove</c> 排在
+    /// <c>RunOnFrameworkThread</c> 裡(從 UI 繪製執行緒呼叫時會真的延後),也會暫時錯開。
+    /// 錯開之後拿 <c>Index</c> 去索引 <c>_lightEntities</c> 就是拆掉<b>別盞燈</b>的 UI 實體;
+    /// <c>Components</c> 是定長陣列,號碼超過長度則是 <see cref="IndexOutOfRangeException"/>。
+    /// </para>
+    ///
+    /// <para>
+    /// 改成用 <c>EntityIndex</c> 只解決一半:那個欄位<b>只在</b>「environment 實體找得到」的分支裡被設定,
+    /// 走過上面那三處 TODO 分支之後它停在 <c>int</c> 的預設值 <c>0</c>,一樣會指到第 0 盞燈的實體。
+    /// 所以這裡完全不靠號碼,直接拿 <see cref="LightEntity.GameLight"/> 做參考相等去認槽位 ——
+    /// 沒有對應實體時自然回 <c>false</c>,不會誤拆別人的。
+    /// </para>
+    ///
+    /// <para>
+    /// 掃描範圍是整個 <c>Components</c> 陣列,但非 null 的格子必定小於 <c>NextAvailableIndex</c>
+    /// (<c>Add</c> 只會寫在那個範圍內),所以交出去的號碼不會踩到 <c>ComponentSet.Remove</c> 的界外分支。
+    /// </para>
+    /// </summary>
+    private bool TryFindLightEntity(IGameLight light, out int entityIndex, out LightEntity? entity)
+    {
+        var components = _lightEntities.Components;
+
+        for(int i = 0; i < components.Length; i++)
+        {
+            if(components[i] is LightEntity candidate && ReferenceEquals(candidate.GameLight, light))
+            {
+                entityIndex = i;
+                entity = candidate;
+                return true;
+            }
+        }
+
+        entityIndex = -1;
+        entity = null;
+        return false;
+    }
+
     public unsafe void RemoveGposeLight(IGameLight light)
     {
         _spawnedLights.Remove(light.Index);
@@ -488,11 +535,12 @@ public unsafe class LightingService : IDisposable
             //    (UI 會留著一個指向已消失光源的項目)。拆 UI 實體與原生指標還有沒有效本來就無關,所以拿掉。
             if(_entityManager.TryGetEntity("environment", out var ent))
             {
-                var camEnt = _lightEntities.Components[light.Index];
-                if(camEnt is not null)
+                // 🔴 用參考相等去認槽位,不要拿 _spawnedLights 的號碼來索引 _lightEntities。
+                //    理由見 TryFindLightEntity 的註解(兩套獨立的索引空間)。
+                if(TryFindLightEntity(light, out var entityIndex, out var camEnt) && camEnt is not null)
                 {
                     ent.RemoveChild(camEnt);
-                    _lightEntities.Remove(light.Index);
+                    _lightEntities.Remove(entityIndex);
                 }
             }
         });
@@ -513,11 +561,12 @@ public unsafe class LightingService : IDisposable
 
             if(_entityManager.TryGetEntity("environment", out var ent))
             {
-                var camEnt = _lightEntities.Components[light.Index];
-                if(camEnt is not null)
+                // 🔴 用參考相等去認槽位,不要拿 _spawnedLights 的號碼來索引 _lightEntities。
+                //    理由見 TryFindLightEntity 的註解(兩套獨立的索引空間)。
+                if(TryFindLightEntity(light, out var entityIndex, out var camEnt) && camEnt is not null)
                 {
                     ent.RemoveChild(camEnt);
-                    _lightEntities.Remove(light.Index);
+                    _lightEntities.Remove(entityIndex);
                 }
             }
         });
