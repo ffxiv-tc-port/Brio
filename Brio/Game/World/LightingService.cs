@@ -540,9 +540,33 @@ public unsafe class LightingService : IDisposable
         });
     }
 
+    /// <summary>
+    /// 每幀把 Brio 管著的光源推回渲染器。
+    ///
+    /// <para>
+    /// 🔴 條件原本是 <c>IsGPosing || IsFrameworkUnloading == false</c>。Dalamud 的
+    /// <c>Framework.HandleFrameworkDestroy</c> 是先 <c>frameworkDestroy.Cancel()</c>
+    /// (<c>IsFrameworkUnloading</c> 從此為 true)再<b>緊接著</b>把 <c>DispatchUpdateEvents</c> 設為 false,
+    /// 而 <c>Update</c> 事件只在 <c>DispatchUpdateEvents</c> 為 true 時才發送 ——
+    /// 兩者都在遊戲主執行緒上、Update 與 Destroy 兩個 hook 不會交錯,
+    /// 所以<b>在 Update 處理常式裡 <c>IsFrameworkUnloading</c> 恆為 false</b>。
+    /// 於是舊式的右半恆真 ⇒ 整條恆真 ⇒ <c>IsGPosing</c> 完全沒有作用;
+    /// 而它唯一能讓右半變 false 的情況(卸載中)反而要靠左半的 <c>IsGPosing</c> 把迴圈<b>打開</b>,
+    /// 正好是那個卸載檢查想擋的事。原意是 <c>&amp;&amp;</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// 改成 <c>&amp;&amp;</c> 之後「不在 GPose」就整段不跑,這是安全的:光源只能在 GPose 中生出來
+    /// (<c>EnvironmentContainerEntity.DrawContextButton</c> 與 <c>LightContainerCapability.IsAllowed</c>
+    /// 兩個入口都用 <c>IsGPosing</c> 鎖住),而離開 GPose 時 <c>OnGPoseStateChange(false)</c> 會
+    /// <c>DestroyAllLights()</c> 清空 <c>_spawnedLights</c>。也就是說正常路徑上「不在 GPose」時
+    /// 本來就沒有東西要更新;真的有燈沒清乾淨時,停止每幀去解參考遊戲可能已經收回的記憶體才是對的。
+    /// <c>IsGPosing</c> 含 Brio 自己的 <c>FakeGPose</c>,所以假 GPose 模式不受影響。
+    /// </para>
+    /// </summary>
     private void OnFrameworkUpdate(IFramework framework)
     {
-        if(_gPoseService.IsGPosing || framework.IsFrameworkUnloading == false)
+        if(_gPoseService.IsGPosing && framework.IsFrameworkUnloading == false)
         {
             foreach(var light in _spawnedLights.AsEnumerable().Where(x => x.IsValid))
             {
