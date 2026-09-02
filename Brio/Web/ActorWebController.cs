@@ -10,8 +10,9 @@ using System.Threading.Tasks;
 
 namespace Brio.Web;
 
-public class ActorWebController(IFramework framework, ActorSpawnService actorSpawnService, ActorRedrawService redrawService) : WebApiController
+public class ActorWebController(IFramework framework, ActorSpawnService actorSpawnService, ActorRedrawService redrawService, IObjectTable objectTable) : WebApiController
 {
+    private readonly IObjectTable _objectTable = objectTable;
     private readonly IFramework _framework = framework;
     private readonly ActorSpawnService _actorSpawnService = actorSpawnService;
     private readonly ActorRedrawService _redrawService = redrawService;
@@ -66,11 +67,20 @@ public class ActorWebController(IFramework framework, ActorSpawnService actorSpa
 
     public unsafe Task WaitForReadyToDraw(IGameObject go)
     {
+        // 🔴 RunUntilSatisfied 會逐幀重排最多 100 幀。go 的 Address 是建構當下凍結的,角色在這段期間
+        //    消失就成了懸空位址;原本的 go.IsValid() 只檢查有沒有登入,對懸空位址零作用
+        //    (本 pin 的 Dalamud/Game/ClientState/Objects/Types/GameObject.cs:170-177)。
+        //    改成只抄走位址,每一幀由物件表重查(GetObjectAddress 只讀指標陣列,不解參)。
+        //    (FromAddress 只讀包裝物件自己的 Address 欄位,建構這一步本身也不解參。)
+        var actorRef = LiveActorRef.FromAddress(_objectTable, go.Address);
+
         return _framework.RunUntilSatisfied(
            () => {
-               if(go.IsValid())
-                   return go.Native()->IsReadyToDraw();
-               return false;
+               var native = actorRef.GameObject;
+               if(native == null)
+                   return false;
+
+               return native->IsReadyToDraw();
            },
            (_) => { },
            100,

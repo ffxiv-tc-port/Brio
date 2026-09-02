@@ -17,7 +17,7 @@ using System.Threading.Tasks;
 
 namespace Brio.Game.Scene;
 
-public class SceneService(EntityManager _entityManager, VirtualCameraManager _virtualCameraManager, IFramework _framework)
+public class SceneService(EntityManager _entityManager, VirtualCameraManager _virtualCameraManager, IFramework _framework, IObjectTable _objectTable)
 {
     public bool IsLoading { get; private set; }
 
@@ -80,8 +80,18 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
             {
                 var (actorId, actor) = actorCapability.CreateProp(false);
 
+                // 🔴 actor 的 Address 是建構當下凍結的,而下面這個條件會逐幀重跑最多 100 幀。
+                //    角色在這段期間消失就成了懸空位址,actor.Native()->IsReadyToDraw() 會踩到已釋放的
+                //    記憶體(AccessViolationException 在 .NET Core 連 try/catch 都攔不到)。
+                //    抄走索引 + 位址,每一幀由物件表重查;完成動作只用 actorId,本來就不解參。
+                var actorRef = new LiveActorRef(_objectTable, actor);
+
                 _framework.RunUntilSatisfied(
-                    () => actor.Native()->IsReadyToDraw(),
+                    () =>
+                    {
+                        var native = actorRef.Character;
+                        return native != null && native->IsReadyToDraw();
+                    },
                     (__) =>
                     {
                         _ = LoadProp(actorId, actorFile);
@@ -94,8 +104,18 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
             {
                 var (actorId, actor) = actorCapability.CreateCharacter(actorFile.HasChild, false, forceSpawnActorWithoutCompanion: !actorFile.HasChild);
 
+                // 🔴 actor 的 Address 是建構當下凍結的,而下面這個條件會逐幀重跑最多 100 幀。
+                //    角色在這段期間消失就成了懸空位址,actor.Native()->IsReadyToDraw() 會踩到已釋放的
+                //    記憶體(AccessViolationException 在 .NET Core 連 try/catch 都攔不到)。
+                //    抄走索引 + 位址,每一幀由物件表重查;完成動作只用 actorId,本來就不解參。
+                var actorRef = new LiveActorRef(_objectTable, actor);
+
                 _framework.RunUntilSatisfied(
-                    () => actor.Native()->IsReadyToDraw(),
+                    () =>
+                    {
+                        var native = actorRef.Character;
+                        return native != null && native->IsReadyToDraw();
+                    },
                     (__) =>
                     {
                         _ = ApplyDataToActor(actorId, actorFile);

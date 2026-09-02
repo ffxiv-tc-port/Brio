@@ -19,6 +19,7 @@ using System.Diagnostics.CodeAnalysis;
 using CharacterCopyFlags = FFXIVClientStructs.FFXIV.Client.Game.Character.CharacterSetupContainer.CopyFlags;
 using ClientObjectManager = FFXIVClientStructs.FFXIV.Client.Game.Object.ClientObjectManager;
 using NativeCharacter = FFXIVClientStructs.FFXIV.Client.Game.Character.Character;
+using NativeGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace Brio.Game.Actor;
 
@@ -152,11 +153,25 @@ public class ActorSpawnService : IDisposable
     {
         if(CreateCharacter(out ICharacter? chara, SpawnFlags.IsProp | SpawnFlags.CopyPosition, true))
         {
+            // 🔴 RunUntilSatisfied 會逐幀重排最多 100 幀,而 chara 的 Address 是建構當下凍結的。
+            //    道具在這段期間被銷毀就成了懸空位址,chara.Native()->IsReadyToDraw() 會踩到已釋放的記憶體
+            //    —— AccessViolationException 在 .NET Core 是 corrupted-state exception,
+            //    ProcessTask 外圍的 try/catch 完全攔不到。抄走索引 + 位址,每一幀由物件表重查。
+            var actorRef = new LiveActorRef(_objectTable, chara);
+
             _framework.RunUntilSatisfied(
-            () => chara.Native()->IsReadyToDraw(),
+            () =>
+            {
+                var native = actorRef.Character;
+                return native != null && native->IsReadyToDraw();
+            },
             (__) =>
             {
-                var entity = _entityManager.GetEntity(chara.Native());
+                var native = actorRef.Character;
+                if(native == null)
+                    return;
+
+                var entity = _entityManager.GetEntity(native);
                 if(entity is not null)
                 {
                     entity.GetCapability<ActionTimelineCapability>().SetOverallSpeedOverride(0);
@@ -173,10 +188,17 @@ public class ActorSpawnService : IDisposable
 
                     _framework.RunOnTick(() =>
                     {
+                        // 又過了 5 幀,entity.GameObject.Address 一樣可能已經懸空 —— 先確認它還在物件表裡。
+                        if(actorRef.IsAlive == false)
+                            return;
+
                         entity.GetCapability<PosingCapability>().LoadResourcesPose("Data.BrioPropPose.pose");
 
                         _framework.RunOnTick(() =>
                         {
+                            if(actorRef.IsAlive == false)
+                                return;
+
                             entity.GetCapability<ActorAppearanceCapability>().AttachWeapon();
                         }, delayTicks: 5);
                     }, delayTicks: 5);
@@ -290,13 +312,60 @@ public class ActorSpawnService : IDisposable
         publicSetCompanion(character, container.Kind, (short)container.Id);
 
         // We need to wait for the companion to be ready before we can draw it.
-        var companionNative = &character.Native()->CompanionObject->Character.GameObject;
+        //
+        // 🔴🔴 原本這裡把 &character.Native()->CompanionObject->Character.GameObject 這個**裸原生指標**
+        //     捕獲進最多 1000 幀(60fps 下約 16 秒)的逐幀重排回呼,每一幀拿它解參,滿足時還往裡面寫
+        //     EnableDraw()。宿主或同伴在這 16 秒內被銷毀是使用者按一下就會發生的事,而
+        //     AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到
+        //     ⇒ 直接把遊戲弄崩。character 本身的 Address 也是建構當下凍結的,
+        //     CalculateCompanionInfo 每一幀都在解參它,同樣會踩到懸空位址。
+        //
+        //     同伴物件是宿主的子結構(CompanionObject),沒有自己能抄走的穩定身分,所以正解是
+        //     「每一幀從宿主重新導航」:抄走宿主的物件表索引 + 位址(都是值型別),每一幀先由物件表
+        //     確認宿主還在(GetObjectAddress 只讀物件表的指標陣列、不解參任何存下來的位址),
+        //     再從活著的宿主重新讀 CompanionObject。宿主不在了就一直回報未滿足,最後由
+        //     RunUntilSatisfied 自己逾時(留下一行 Warning),全程不解參懸空位址。
+        var hostRef = new LiveActorRef(_objectTable, character);
+
         _framework.RunUntilSatisfied(
-            () => character.CalculateCompanionInfo(out var info) && info.Kind == container.Kind && info.Id == container.Id && companionNative->IsReadyToDraw(),
-            (_) => companionNative->EnableDraw(),
+            () =>
+            {
+                var companionGameObject = ResolveCompanionGameObject(hostRef, container);
+                return companionGameObject != null && companionGameObject->IsReadyToDraw();
+            },
+            (_) =>
+            {
+                var companionGameObject = ResolveCompanionGameObject(hostRef, container);
+                if(companionGameObject != null)
+                    companionGameObject->EnableDraw();
+            },
             1000,
             dontStartFor: 1
         );
+    }
+
+    /// <summary>
+    /// 每次呼叫都先由物件表重新確認宿主還活著,再從宿主導航到同伴物件。
+    /// 宿主已消失、同伴槽是空的、或現在掛著的同伴不是這次要求的那一隻時回傳 <c>null</c>,
+    /// 全程不解參任何先前存下來的位址。<b>回傳的指標只能在同一幀之內使用。</b>
+    /// 條件與原本的 <c>character.CalculateCompanionInfo(out info) &amp;&amp; info.Kind == container.Kind
+    /// &amp;&amp; info.Id == container.Id</c> 逐項等價(CalculateCompanionInfo 為真 ≡ Kind != None)。
+    /// </summary>
+    private unsafe NativeGameObject* ResolveCompanionGameObject(LiveActorRef hostRef, CompanionContainer container)
+    {
+        var host = hostRef.Character;
+        if(host == null)
+            return null;
+
+        var companion = host->CompanionObject;
+        if(companion == null)
+            return null;
+
+        var info = CharacterExtensions.GetCompanionInfo(host);
+        if(info.Kind == CompanionKind.None || info.Kind != container.Kind || info.Id != container.Id)
+            return null;
+
+        return &companion->Character.GameObject;
     }
 
     private unsafe void publicSetCompanion(ICharacter character, CompanionKind kind, short id)

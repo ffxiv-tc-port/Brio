@@ -105,10 +105,12 @@ public class BrioIPCService : IDisposable
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly IFramework _framework;
     private readonly PhysicsService _physicsService;
+    private readonly IObjectTable _objectTable;
 
     public BrioIPCService(ActorSpawnService actorSpawnService, GPoseService gPoseService, ConfigurationService configurationService, EntityManager entityManager,
-        IDalamudPluginInterface pluginInterface, IFramework framework, PhysicsService physicsService)
+        IDalamudPluginInterface pluginInterface, IFramework framework, PhysicsService physicsService, IObjectTable objectTable)
     {
+        _objectTable = objectTable;
         _actorSpawnService = actorSpawnService;
         _gPoseService = gPoseService;
         _configurationService = configurationService;
@@ -299,11 +301,25 @@ public class BrioIPCService : IDisposable
             {
                 unsafe
                 {
+                    // 🔴 character 的 Address 是建構當下凍結的,而下面這個條件會逐幀重跑最多 100 幀。
+                    //    角色在這段期間被銷毀就成了懸空位址,character.Native() 的解參會踩到已釋放的記憶體
+                    //    (AccessViolationException 在 .NET Core 連 try/catch 都攔不到)。
+                    //    抄走索引 + 位址,每一幀由物件表重查。
+                    var actorRef = new LiveActorRef(_objectTable, character);
+
                     _framework.RunUntilSatisfied(
-                        () => character.Native()->IsReadyToDraw(),
+                        () =>
+                        {
+                            var native = actorRef.Character;
+                            return native != null && native->IsReadyToDraw();
+                        },
                         (__) =>
                         {
-                            if(_entityManager.TryGetEntity(character.Native(), out var entity))
+                            var native = actorRef.Character;
+                            if(native == null)
+                                return;
+
+                            if(_entityManager.TryGetEntity(native, out var entity))
                             {
                                 if(entity.TryGetCapability<ActionTimelineCapability>(out var actionTimeline))
                                 {
