@@ -46,8 +46,12 @@ public partial class ImBrio
         {
             using var _ = ImRaii.Disabled(true);
             ImGui.Button("Unable to Spawn");
-        }
 
+            // 🔴 原本這裡漏了 return:服務拿不到時只是多畫一個停用的按鈕,接著照樣往下畫
+            //    「Spawn As New Actor」並在按下去時用 null 的 spawnService 呼叫 CreateCharacter
+            //    ⇒ NullReferenceException。而且兩個按鈕會同時出現在畫面上。
+            return;
+        }
 
         if(ImGui.Button("Spawn As New Actor"))
         {
