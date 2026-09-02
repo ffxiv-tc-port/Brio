@@ -165,6 +165,20 @@ public class PosingCapability : ActorCharacterCapability
         bool asExpression = false, bool expressionPhase2 = false, bool asScene = false, bool asIPCpose = false, bool asBody = false, bool asProp = false,
         TransformComponents? transformComponents = null, bool? applyModelTransformOverride = null)
     {
+        // 🔴 本函式的三個入口全部是「延後好幾幀之後」才跑的:
+        //    ① ImportPose 把它包成 postStopAction 交給 ActionTimelineCapability.StopSpeedAndResetTimeline,
+        //       那支要等 await RunOnTick(delayTicks: 4) 回來才 Invoke ⇒ 一定跨 4 幀以上。
+        //    ② Snapshot 的表情路徑(本身由 delayTicks: 4 的回呼叫進來)。
+        //    ③ Reconcile 的 delayTicks: 2 回呼。
+        //    而 ModelPosing.ImportModelPose 會讀寫 Transform → ModelTransformService.GetTransform /
+        //    SetTransform(GameObject) → go.Native() 解參與寫入;asExpression 路徑的 GeneratePoseFile
+        //    也會讀 Transform。GameObject.Address 是建構當下凍結的,角色在那幾幀之內消失就是懸空位址,
+        //    AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+        //    IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
+        //    角色還活著時與原本逐字相同;不在了就整批不做,而不是崩潰。
+        if(Actor.IsGameObjectAlive == false)
+            return;
+
         var poseFile = rawPoseFile.Match(
                 poseFile => poseFile,
                 cmToolPoseFile => cmToolPoseFile.Upgrade()
@@ -241,7 +255,19 @@ public class PosingCapability : ActorCharacterCapability
         }
 
         if(generateSnapshot)
-            _framework.RunOnTick(() => Snapshot(reset, reconcile, asExpression: asExpression), delayTicks: 4);
+            _framework.RunOnTick(() =>
+            {
+                // 🔴 這是 4 幀之後才跑的。Snapshot 會讀 ModelPosing.OriginalTransform 與 ModelPosing.Transform,
+                //    兩者都會走 ModelTransformService.GetTransform(GameObject) → go.Native() 解參,
+                //    而 GameObject.Address 是建構當下凍結的 ⇒ 角色在這 4 幀之內消失就是懸空讀取,
+                //    AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+                //    ⚠️ 閘門只加在這個「延後」的呼叫點:十幾個同步呼叫 Snapshot 的 UI 位置完全不受影響,
+                //    場景載入的成功路徑也與原本逐字相同(那時角色必定還在物件表裡)。
+                if(Actor.IsGameObjectAlive == false)
+                    return;
+
+                Snapshot(reset, reconcile, asExpression: asExpression);
+            }, delayTicks: 4);
     }
 
     public PoseFile ExportPose()
@@ -348,6 +374,16 @@ public class PosingCapability : ActorCharacterCapability
     {
         _framework.RunOnTick(() =>
         {
+            // 🔴 這是 2 幀之後才跑的,而且三個動作都會解參 GameObject:
+            //    GeneratePoseFile → ModelPosing.ExportModelPose → Transform(getter)
+            //    Reset → ModelPosing.ResetTransform → ModelTransformService.SetTransform(GameObject, ...)
+            //    ImportPose_Internal → ModelPosing.ImportModelPose → Transform(getter/setter)
+            //    GameObject.Address 是建構當下凍結的,角色在這 2 幀之內消失就是懸空位址,
+            //    AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+            //    IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
+            if(Actor.IsGameObjectAlive == false)
+                return;
+
             var all = new PoseImporterOptions(new BoneFilter(_posingService), TransformComponents.All, true);
             var poseFile = GeneratePoseFile();
             if(reset)
