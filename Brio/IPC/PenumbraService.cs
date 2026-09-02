@@ -200,6 +200,22 @@ public class PenumbraService : BrioIPC
         return await _penumbraResolvePaths.Invoke(forward, reverse).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// 呼叫端已經在 framework 執行緒上確認過角色還在物件表裡、並且<b>在同一個回呼裡</b>把索引讀出來時用這一支。
+    /// 另一個多載是在它自己的 framework 回呼裡才去解參考 <c>IGameObject.ObjectIndex</c> —— 那已經是後來的某一幀,
+    /// 角色若在這之間消失就是懸空讀,而 AccessViolationException 在 .NET Core 攔不到。
+    /// </summary>
+    public async Task<Dictionary<string, HashSet<string>>?> GetCharacterData(ushort objectIndex)
+    {
+        if(IsAvailable == false) return null;
+
+        return await _framework.RunOnFrameworkThread(() =>
+        {
+            Brio.Log.Debug("Calling On IPC: Penumbra.GetGameObjectResourcePaths");
+            return _penumbraResourcePaths.Invoke(objectIndex)[0];
+        }).ConfigureAwait(false);
+    }
+
     public async Task<Dictionary<string, HashSet<string>>?> GetCharacterData(IGameObject gameObject)
     {
         if(IsAvailable == false) return null;

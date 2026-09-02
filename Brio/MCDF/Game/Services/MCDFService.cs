@@ -26,6 +26,35 @@ using System.Threading.Tasks;
 
 namespace Brio.MCDF.Game.Services;
 
+/// <summary>
+/// 匯出流程用的角色身分。<b>只保存值型別,不保存 IGameObject。</b>
+///
+/// <para>
+/// 匯出一份 MCDF 中間有 WaitForDrawing、最長 10 秒的存在性輪詢、以及數個 Penumbra / Glamourer / Customize+ 的
+/// IPC 往返,前後跨越數百幀。<c>IGameObject</c> 的 <c>Address</c> 是建構當下凍結的、永不重新解析,
+/// 角色在這段期間離開 GPose 或消失之後,任何解參考(<c>Name</c> / <c>ObjectIndex</c> / <c>ObjectKind</c> /
+/// <c>GameObjectId</c> —— 最後這個還是虛擬函式呼叫)都是懸空讀。
+/// AccessViolationException 在 .NET Core 是 corrupted-state exception,<c>try/catch</c> 攔不到。
+/// </para>
+///
+/// <para>
+/// 重新繫結時<b>兩個條件都要成立</b>,兩者互相補對方的盲點:
+/// <list type="number">
+/// <item><c>ObjectIndex</c> + <c>Address</c> 仍在物件表裡(<c>LiveActorRef</c>,只讀物件表自己的指標陣列,
+/// 不解參考任何存下來的位址)⇒ 記憶體安全;這一條擋不住的是槽位被回收後換人(ABA)。</item>
+/// <item>重查到的物件回報的 <c>GameObjectId</c> 與當初抄下來的相同 ⇒ 身分正確;
+/// 這一條擋不住的是同一個 id 出現在多個槽位(GPose 複本),那由第 1 條擋。</item>
+/// </list>
+/// 所以這裡刻意<b>不</b>用 <c>SearchById</c>:它只比 id、回傳第一個命中,而且對 id 為 0 的角色直接回 null。
+/// (套用流程 ApplyDataAsync 走的是 SearchById —— 那裡的語意是「這個角色回來了就繼續套」,
+/// 匯出的語意則是「來源中途沒了就中止」,不該改繫結到別的物件上。)
+/// </para>
+/// </summary>
+internal readonly record struct McdfExportActor(string Name, ulong GameObjectId, int ObjectIndex, nint Address);
+
+/// <summary>匯出途中角色從物件表消失。用專屬型別讓上層能與「真的出錯」分開處理。</summary>
+internal sealed class McdfExportActorLostException(string message) : Exception(message);
+
 public class MCDFService : IDisposable
 {
     public static readonly IImmutableList<string> AllowedFileExtensions = [".mdl", ".tex", ".mtrl", ".tmb", ".pap", ".avfx", ".atex", ".sklb", ".eid", ".phyb", ".pbd", ".scd", ".skp", ".shpk", ".kdb"];
@@ -111,7 +140,16 @@ public class MCDFService : IDisposable
     }
     public async Task SaveMCDF(string path, string description, IGameObject gameObject)
     {
-        UiBlockingComputation = Task.Run(async () => await SaveCharaFileAsync(description, path, gameObject).ConfigureAwait(false));
+        // 在 framework 執行緒上、而且確認過物件還在物件表裡之後才抄身分(CaptureActorAsync 自己會做這兩件事),
+        // 之後整條匯出流程都不再持有這個 IGameObject。
+        var actor = await CaptureActorAsync(gameObject).ConfigureAwait(false);
+        if(actor is null)
+        {
+            Brio.Log.Information("角色已不在物件表裡,取消 MCDF 匯出(階段:抄下匯出目標)。");
+            return;
+        }
+
+        UiBlockingComputation = Task.Run(async () => await SaveCharaFileAsync(description, path, actor.Value).ConfigureAwait(false));
 
         await UiBlockingComputation.ConfigureAwait(false);
     }
@@ -424,6 +462,85 @@ public class MCDFService : IDisposable
 
     // Save
 
+    /// <summary>
+    /// 在 framework 執行緒上抄下角色身分。先由物件表確認呼叫端給的包裝還指向表裡的物件,再解參考讀名字與 id;
+    /// 呼叫端拿著的是好幾幀前的包裝時回 <c>null</c>,不會踩到懸空位址。
+    /// </summary>
+    private async Task<McdfExportActor?> CaptureActorAsync(IGameObject? gameObject)
+        => await _framework.RunOnFrameworkThread(() => CaptureActor(gameObject)).ConfigureAwait(false);
+
+    private McdfExportActor? CaptureActor(IGameObject? gameObject)
+    {
+        if(gameObject is null)
+            return null;
+
+        // go.Address 只讀包裝自己的欄位、GetObjectAddress 只讀物件表自己的指標陣列,兩者都不解參考。
+        var address = LiveActorRef.FromAddress(_objectTable, gameObject.Address).Address;
+        if(address == nint.Zero)
+            return null;
+
+        // 位址確認還在物件表裡了,這時候解參考才安全。CreateObjectReference 產生的是獨立包裝,
+        // 不會被物件表槽位的共用實例就地改寫。
+        var live = _objectTable.CreateObjectReference(address);
+        if(live is null)
+            return null;
+
+        return new McdfExportActor(live.Name.TextValue, live.GameObjectId, live.ObjectIndex, address);
+    }
+
+    /// <summary>
+    /// 角色現在還在物件表裡、而且還是同一個角色時,回傳一個當場產生的獨立包裝,否則回 <c>null</c>。
+    /// <b>必須在 framework 執行緒上呼叫,而且拿到的包裝只能在同一個呼叫堆疊之內用完,不可以再帶過幀。</b>
+    /// </summary>
+    private IGameObject? ResolveExportActor(McdfExportActor actor)
+    {
+        // 第一關:位址還在物件表裡嗎(不解參考)。
+        var address = new LiveActorRef(_objectTable, actor.ObjectIndex, actor.Address).Address;
+        if(address == nint.Zero)
+            return null;
+
+        var live = _objectTable.CreateObjectReference(address);
+        if(live is null)
+            return null;
+
+        // 第二關:還在的是不是同一個角色(擋槽位被回收之後換人)。此時位址已確認在表裡,解參考是安全的。
+        if(live.GameObjectId != actor.GameObjectId)
+            return null;
+
+        return live;
+    }
+
+    /// <summary>
+    /// 在 framework 執行緒上重查角色,<b>並且在同一個回呼裡就把要用的東西讀完</b>。
+    /// 這樣「確認還活著」與「解參考」之間不會夾一次執行緒切換,不會有中間跨幀的空窗。
+    /// 查不到就擲 <see cref="McdfExportActorLostException"/> 中止整份匯出。
+    /// </summary>
+    private async Task<T> WithLiveActorAsync<T>(McdfExportActor actor, string stage, Func<IGameObject, T> read)
+    {
+        var result = await _framework.RunOnFrameworkThread(() =>
+        {
+            var live = ResolveExportActor(actor);
+            return live is null ? (false, default(T)!) : (true, read(live));
+        }).ConfigureAwait(false);
+
+        if(result.Item1 == false)
+            throw new McdfExportActorLostException(ActorLostMessage(actor, stage));
+
+        return result.Item2;
+    }
+
+    private static string ActorLostMessage(McdfExportActor actor, string stage)
+        => $"角色已消失,取消 MCDF 匯出(階段:{stage};角色「{actor.Name}」,物件索引 {actor.ObjectIndex},GameObjectId 0x{actor.GameObjectId:X})";
+
+    private async Task<IGameObject> ResolveExportActorOrThrowAsync(McdfExportActor actor, string stage)
+    {
+        var live = await _framework.RunOnFrameworkThread(() => ResolveExportActor(actor)).ConfigureAwait(false);
+        if(live is null)
+            throw new McdfExportActorLostException(ActorLostMessage(actor, stage));
+
+        return live;
+    }
+
     public async Task ExportSelfAsMCDFAsync(string description, string filePath)
     {
         var gposeTaget = await _framework.RunOnTick(() =>
@@ -452,13 +569,25 @@ public class MCDFService : IDisposable
 
     internal async Task SaveCharaFileAsync(string description, string filePath, IGameObject gameObject)
     {
+        var actor = await CaptureActorAsync(gameObject).ConfigureAwait(false);
+        if(actor is null)
+        {
+            Brio.Log.Information("角色已不在物件表裡,取消 MCDF 匯出(階段:抄下匯出目標)。");
+            return;
+        }
+
+        await SaveCharaFileAsync(description, filePath, actor.Value).ConfigureAwait(false);
+    }
+
+    private async Task SaveCharaFileAsync(string description, string filePath, McdfExportActor actor)
+    {
         var tempFilePath = filePath + ".tmp";
 
         try
         {
             Brio.Log.Info("Starting MCDF export...");
 
-            var data = await CreatePlayerData(gameObject).ConfigureAwait(false);
+            var data = await CreatePlayerData(actor).ConfigureAwait(false);
             if(data == null) return;
 
             MareCharaFileData mareCharaFileData = new MareCharaFileData(_fileCacheService, "", data);
@@ -504,8 +633,31 @@ public class MCDFService : IDisposable
 
     public async Task<API.Data.CharacterData?> CreatePlayerData(IGameObject gameObject)
     {
+        var actor = await CaptureActorAsync(gameObject).ConfigureAwait(false);
+        if(actor is null)
+        {
+            Brio.Log.Information("角色已不在物件表裡,取消建立 MCDF 資料。");
+            return null;
+        }
+
+        return await CreatePlayerData(actor.Value).ConfigureAwait(false);
+    }
+
+    private async Task<API.Data.CharacterData?> CreatePlayerData(McdfExportActor actor)
+    {
         CharacterDataEX newCdata = new();
-        var fragment = await BuildCharacterData(gameObject, CancellationToken.None).ConfigureAwait(false);
+
+        CharacterDataFragment? fragment;
+        try
+        {
+            fragment = await BuildCharacterData(actor, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch(McdfExportActorLostException ex)
+        {
+            // 角色中途消失:整份匯出中止,連空檔都不要寫出去。
+            Brio.Log.Information(ex.Message);
+            return null;
+        }
 
         newCdata.SetFragment(API.Data.Enum.ObjectKind.Player, fragment);
 
@@ -532,83 +684,110 @@ public class MCDFService : IDisposable
 
     public async Task<CharacterDataFragment?> BuildCharacterData(IGameObject playerRelatedObject, CancellationToken token)
     {
+        var actor = await CaptureActorAsync(playerRelatedObject).ConfigureAwait(false);
+        if(actor is null) return null;
+
+        return await BuildCharacterData(actor.Value, token).ConfigureAwait(false);
+    }
+
+    private async Task<CharacterDataFragment?> BuildCharacterData(McdfExportActor actor, CancellationToken token)
+    {
         if(IsIPCAvailable is false)
         {
             throw new InvalidOperationException("Penumbra or Glamourer is not connected");
         }
 
-        if(playerRelatedObject == null) return null;
-
         bool pointerIsZero = true;
         try
         {
-            pointerIsZero = playerRelatedObject.Address == IntPtr.Zero;
-            try
-            {
-                pointerIsZero = await CheckForNullDrawObject(playerRelatedObject.Address).ConfigureAwait(false);
-            }
-            catch
-            {
-                pointerIsZero = true;
-                Brio.Log.Debug("NullRef for {object}", playerRelatedObject);
-            }
+            pointerIsZero = await CheckForNullDrawObject(actor).ConfigureAwait(false);
         }
         catch(Exception ex)
         {
-            Brio.Log.Warning(ex, "Could not create data for {object}", playerRelatedObject);
+            pointerIsZero = true;
+            Brio.Log.Warning(ex, "Could not create data for {object}", actor.Name);
         }
 
         if(pointerIsZero)
         {
-            Brio.Log.Debug("Pointer was zero for {objectKind}", playerRelatedObject.ObjectKind);
+            Brio.Log.Debug("Pointer was zero for {object}", actor.Name);
             return null;
         }
 
         try
         {
-            return await CreateCharacterData(playerRelatedObject, token).ConfigureAwait(false);
+            return await CreateCharacterData(actor, token).ConfigureAwait(false);
         }
         catch(OperationCanceledException)
         {
-            Brio.Log.Debug("Cancelled creating Character data for {object}", playerRelatedObject);
+            Brio.Log.Debug("Cancelled creating Character data for {object}", actor.Name);
+            throw;
+        }
+        catch(McdfExportActorLostException)
+        {
+            // 🔴 這一條必須排在下面的 catch(Exception) 前面:被吞掉的話上層會以為只是「沒有資料」,
+            //    然後照樣寫出一個空的 MCDF 檔。這裡讓它往上傳,由 CreatePlayerData 中止整份匯出。
             throw;
         }
         catch(Exception e)
         {
-            Brio.Log.Warning(e, "Failed to create {object} data", playerRelatedObject);
+            Brio.Log.Warning(e, "Failed to create {object} data", actor.Name);
         }
 
         return null;
     }
 
-    private async Task<bool> CheckForNullDrawObject(IntPtr playerPointer)
+    private async Task<bool> CheckForNullDrawObject(McdfExportActor actor)
     {
-        return await _framework.RunOnFrameworkThread(() => CheckForNullDrawObjectUnsafe(playerPointer)).ConfigureAwait(false);
-    }
-    private unsafe bool CheckForNullDrawObjectUnsafe(IntPtr playerPointer)
-    {
-        return ((Character*)playerPointer)->GameObject.DrawObject == null;
+        return await _framework.RunOnFrameworkThread(() => CheckForNullDrawObjectUnsafe(actor)).ConfigureAwait(false);
     }
 
-    private async Task<CharacterDataFragment> CreateCharacterData(IGameObject playerRelatedObject, CancellationToken ct)
+    // 原本這支收的是一個裸 IntPtr,而那個位址是好幾幀之前從包裝物件讀出來的 ——
+    // 角色在這段期間消失就是解參考懸空位址,AccessViolationException 在 .NET Core 攔不到。
+    // 改成在同一個 framework 回呼裡先由物件表確認位址還在(只讀指標陣列,不解參考),再解參考。
+    private unsafe bool CheckForNullDrawObjectUnsafe(McdfExportActor actor)
     {
-        var objectKind = playerRelatedObject.ObjectKind;
+        var native = new LiveActorRef(_objectTable, actor.ObjectIndex, actor.Address).Character;
+        if(native is null)
+            return true;
+
+        return native->GameObject.DrawObject == null;
+    }
+
+    // 🔴 這條路徑從頭到尾跨越數百幀:WaitForDrawing、最長 10 秒的存在性輪詢,以及 Penumbra / Glamourer /
+    //    Customize+ 的 IPC 往返。所以這裡不留 IGameObject,每個要解參考的地方都重查一次;
+    //    查不到就擲 McdfExportActorLostException,由 CreatePlayerData 接住並中止整份匯出(不寫出空檔)。
+    private async Task<CharacterDataFragment> CreateCharacterData(McdfExportActor actor, CancellationToken ct)
+    {
+        var objectKind = await WithLiveActorAsync(actor, "讀取角色種類", go => go.ObjectKind).ConfigureAwait(false);
         CharacterDataFragment fragment = objectKind == ObjectKind.Player ? new CharacterDataFragmentPlayer() : new();
 
-        Brio.Log.Verbose("Building character data for {obj}", playerRelatedObject);
+        Brio.Log.Verbose("Building character data for {obj}", actor.Name);
 
         // wait until chara is not drawing and present so nothing spontaneously explodes
-        await _actorRedrawService.WaitForDrawing(playerRelatedObject).ConfigureAwait(false);
+        // (WaitForDrawing 只讀包裝物件自己的 Address 欄位,之後每一幀自己向物件表重查,不會解參考過期的位址。)
+        var drawTarget = await ResolveExportActorOrThrowAsync(actor, "等待角色繪製完成").ConfigureAwait(false);
+        await _actorRedrawService.WaitForDrawing(drawTarget).ConfigureAwait(false);
+
+        // 🔴 原本這個迴圈的條件是 _dalamudService.IsObjectPresentAsync(playerRelatedObject),而它底下是
+        //    IGameObject.IsValid() —— 本 pin 的 Dalamud 那支只檢查「有沒有登入」,對已經消失的角色永遠回 true,
+        //    所以這個迴圈從來不會因為「角色不在了」而多等一次,也從來不會因此結束。
+        //    改成真的去物件表查(只讀指標陣列,不解參考存下來的位址)。
         int totalWaitTime = 10000;
-        while(!await _dalamudService.IsObjectPresentAsync(playerRelatedObject).ConfigureAwait(false) && totalWaitTime > 0)
+        while(totalWaitTime > 0)
         {
+            var present = await _framework.RunOnFrameworkThread(() => ResolveExportActor(actor) is not null).ConfigureAwait(false);
+            if(present)
+                break;
+
             Brio.Log.Debug("Character is null but it shouldn't be, waiting");
             await Task.Delay(50, ct).ConfigureAwait(false);
             totalWaitTime -= 50;
         }
 
         // Make sure Brio can't MCDF if the actor had a "Mare" actor loaded on it by cheaking for lock from glamourer
-        if(_glamourerService.CheckForLock(playerRelatedObject))
+        // (重查與 CheckForLock 放在同一個 framework 回呼裡:CheckForLock 內部會讀 ObjectIndex,那是解參考。)
+        if(await WithLiveActorAsync(actor, "檢查 Glamourer 鎖定", go => _glamourerService.CheckForLock(go)).ConfigureAwait(false))
         {
             Brio.Log.Information("Unable to apply MCDF, Actor is Locked by Glamourer");
             Brio.NotifyError("Unable to apply MCDF! Actor is Locked! Are you using a sync service?!");
@@ -621,14 +800,17 @@ public class MCDFService : IDisposable
         Dictionary<string, List<ushort>>? boneIndices =
             objectKind != ObjectKind.Player
             ? null
-            : await _framework.RunOnFrameworkThread(() => GetSkeletonBoneIndices(playerRelatedObject)).ConfigureAwait(false);
+            : await WithLiveActorAsync(actor, "讀取骨架骨骼索引", GetSkeletonBoneIndices).ConfigureAwait(false);
 
         DateTime start = DateTime.UtcNow;
 
         // penumbra call, it's currently broken (How is this broken?) (KEN)
         Dictionary<string, HashSet<string>>? resolvedPaths;
 
-        resolvedPaths = (await _penumbraService.GetCharacterData(playerRelatedObject).ConfigureAwait(false));
+        // 物件索引在「確認角色還在物件表裡」的同一個 framework 回呼裡讀出來,再交給 Penumbra ——
+        // 原本是把 IGameObject 交過去、由 Penumbra 自己在之後某一幀才去解參考它的 ObjectIndex。
+        var penumbraIndex = await WithLiveActorAsync(actor, "取得 Penumbra 資源路徑", go => go.ObjectIndex).ConfigureAwait(false);
+        resolvedPaths = (await _penumbraService.GetCharacterData(penumbraIndex).ConfigureAwait(false));
         if(resolvedPaths == null) throw new InvalidOperationException("Penumbra returned null data");
 
         ct.ThrowIfCancellationRequested();
@@ -649,7 +831,7 @@ public class MCDFService : IDisposable
 
         ct.ThrowIfCancellationRequested();
 
-        Brio.Log.Verbose("Handling transient update for {obj}", playerRelatedObject);
+        Brio.Log.Verbose("Handling transient update for {obj}", actor.Name);
 
         // remove all potentially gathered paths from the transient resource manager that are resolved through static resolving
         _transientResourceService.ClearTransientPaths(API.Data.Enum.ObjectKind.Player, fragment.FileReplacements.SelectMany(c => c.GamePaths).ToList());
@@ -677,8 +859,14 @@ public class MCDFService : IDisposable
         //Task<string> getHeelsOffset = _ipcManager.Heels.GetOffsetAsync();
         //Task<string> getHonorificTitle = _ipcManager.Honorific.GetTitle();
 
-        Task<string> getGlamourerData = _glamourerService.GetCharacterCustomizationAsync(playerRelatedObject.Address);
-        Task<string?> getCustomizeData = _customizePlusService.GetScaleAsync(playerRelatedObject);
+        // GetCharacterCustomizationAsync 收的是位址,它自己會在 framework 執行緒上先向物件表確認再解參考,
+        // 所以這裡把當初抄下來的位址交過去就行(見 GlamourerService)。
+        Task<string> getGlamourerData = _glamourerService.GetCharacterCustomizationAsync(actor.Address);
+
+        // ⚠️ Customize+ 這一支內部自己會切到 framework 執行緒才解參考,沒有辦法從外面把「重查」塞進它那個回呼裡,
+        //    所以這裡仍然有一次切換的空窗。至少改成當場重查出來的獨立包裝,不再是數百幀前的那一個。
+        var customizeTarget = await ResolveExportActorOrThrowAsync(actor, "取得 Customize+ 縮放").ConfigureAwait(false);
+        Task<string?> getCustomizeData = _customizePlusService.GetScaleAsync(customizeTarget);
         
         fragment.GlamourerString = await getGlamourerData.ConfigureAwait(false);
         Brio.Log.Verbose("Glamourer is now: {data}", fragment.GlamourerString);
@@ -855,10 +1043,19 @@ public class MCDFService : IDisposable
         return pathsToResolve;
     }
 
+    // 🔴 這支是 public 的,呼叫端可能拿著好幾幀之前建構的包裝(IGameObject 的 Address 是建構當下凍結的)。
+    //    handler.Address 只讀包裝自己的欄位、GetObjectAddress 只讀物件表自己的指標陣列,兩者都不解參考,
+    //    所以先做這個確認永遠安全;確認過之後拿到的指標只能在這個呼叫堆疊之內用完。
     public unsafe Dictionary<string, List<ushort>>? GetSkeletonBoneIndices(IGameObject handler)
     {
-        if(handler.Address == nint.Zero) return null;
-        var chara = (CharacterBase*)(((Character*)handler.Address)->GameObject.DrawObject);
+        var native = LiveActorRef.FromAddress(_objectTable, handler.Address).Character;
+        if(native is null) return null;
+
+        // 原本沒有這個判空:DrawObject 為 null 時直接呼叫 GetModelType() 就是對 null 解參考。
+        var drawObject = native->GameObject.DrawObject;
+        if(drawObject is null) return null;
+
+        var chara = (CharacterBase*)drawObject;
         if(chara->GetModelType() != CharacterBase.ModelType.Human) return null;
         var resHandles = chara->Skeleton->SkeletonResourceHandles;
         Dictionary<string, List<ushort>> outputIndices = [];

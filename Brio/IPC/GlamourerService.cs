@@ -238,7 +238,14 @@ public class GlamourerService : BrioIPC
         {
             return await _framework.RunOnFrameworkThread(() =>
             {
-                var gameObj = _gameObjects.CreateObjectReference(character);
+                // 🔴 character 是呼叫端好幾幀之前讀出來的位址,而 CreateObjectReference 會解參考它去讀 ObjectKind
+                //    (本 pin 的 Dalamud ObjectTable.cs:155-156)。角色已消失的話那就是懸空讀,try/catch 攔不到。
+                //    先由物件表確認位址還在 —— 只讀物件表自己的指標陣列,不解參考任何存下來的位址。
+                var liveAddress = LiveActorRef.FromAddress(_gameObjects, character).Address;
+                if(liveAddress == nint.Zero)
+                    return string.Empty;
+
+                var gameObj = _gameObjects.CreateObjectReference(liveAddress);
                 if(gameObj is ICharacter c)
                 {
                     return _glamourerGetAllCustomization!.Invoke(c.ObjectIndex).Item2 ?? string.Empty;
