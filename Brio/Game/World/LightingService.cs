@@ -68,17 +68,8 @@ public unsafe class LightingService : IDisposable
     private readonly ComponentSet<LightEntity> _lightEntities = [];
 
     // EventFramework.Instance() 可能為 null;對 null 取欄位位址不會當場崩,但回傳的指標一解參考就是 AVE。
-    public unsafe EventGPoseControllerEX* CurrentGPoseState
-    {
-        get
-        {
-            var eventFramework = EventFramework.Instance();
-            if(eventFramework == null)
-                return null;
-
-            return (EventGPoseControllerEX*)&eventFramework->EventSceneModule.EventGPoseController;
-        }
-    }
+    // 實作搬到 EventGPoseControllerEX.Current(靜態),讓不持有本服務的 Light 也查得到 GPose 光源槽位。
+    public unsafe EventGPoseControllerEX* CurrentGPoseState => EventGPoseControllerEX.Current;
 
     public int SpawnedLightEntitiesCount => _lightEntities.ActiveCount;
     public List<LightEntity> SpawnedLightEntities => [.. _lightEntities];
@@ -445,7 +436,11 @@ public unsafe class LightingService : IDisposable
 
         _framework.RunOnFrameworkThread(() =>
         {
-            if(light.IsValid && _entityManager.TryGetEntity("environment", out var ent))
+            // 🔴 這裡原本寫 light.IsValid &&。本函式唯一的呼叫端是 ToggleLightDetour 判定
+            //    「遊戲剛剛把這個 GPose 光源槽位清掉」之後 —— 也就是 IsValid 為 false 才會走到這裡。
+            //    IsValid 改成真的會查槽位之後,那個條件會永遠不成立,實體就再也拆不下來
+            //    (UI 會留著一個指向已消失光源的項目)。拆 UI 實體與原生指標還有沒有效本來就無關,所以拿掉。
+            if(_entityManager.TryGetEntity("environment", out var ent))
             {
                 var camEnt = _lightEntities.Components[light.Index];
                 if(camEnt is not null)
@@ -541,6 +536,24 @@ public struct EventGPoseControllerEX
 
     [FieldOffset(0x0E0)] public unsafe fixed ulong Lights[3];
 
+    /// <summary>
+    /// 目前的 GPose 光源控制器,取不到時為 <c>null</c>。
+    /// EventFramework 是長生單例、EventSceneModule 與 EventGPoseController 都是內嵌欄位,
+    /// 所以這個指標的壽命跟遊戲行程一樣長 —— 但 <c>Instance()</c> 在還沒建立前會是 null,
+    /// 對 null 取欄位位址不會當場崩,回傳的指標一解參考才是 AVE,所以這裡先擋掉。
+    /// </summary>
+    public static unsafe EventGPoseControllerEX* Current
+    {
+        get
+        {
+            var eventFramework = EventFramework.Instance();
+            if(eventFramework == null)
+                return null;
+
+            return (EventGPoseControllerEX*)&eventFramework->EventSceneModule.EventGPoseController;
+        }
+    }
+
     // 🔴 Lights 是 fixed ulong[3]。上游沒有邊界檢查,index >= 3 會讀到陣列外的位元組
     //    再當成指標解參考 —— 那是 AccessViolation,try/catch 攔不到。
     public const uint LightCount = 3;
@@ -576,13 +589,59 @@ public unsafe class Light : IGameLight, IDisposable
 
     public int Index => _index;
     public int EntityIndex => _entityIndex;
-    public bool IsValid => GameLight != null;
+
+    /// <summary>
+    /// 這個光源現在還能不能解參考。<b>兩種光源的存活判定不一樣,不要合併。</b>
+    ///
+    /// <para>
+    /// <b>Brio 自己生的光源</b>(<see cref="IsGPoseLight"/> 為 false):記憶體是 LightingService.SpawnGameLight 裡
+    /// <c>Marshal.AllocHGlobal</c> 配出來的,全外掛只有 <see cref="Destroy"/> 會釋放它,而且釋放的同一個
+    /// 區塊裡就把 <c>_gameLight</c> 設回 null。沒有第三方能在我們背後把它收掉 ⇒ 判空就是正確的存活判定。
+    /// </para>
+    ///
+    /// <para>
+    /// 🔴 <b>GPose 光源</b>(<see cref="IsGPoseLight"/> 為 true):記憶體是<b>遊戲</b>配的,指標是從
+    /// <c>EventGPoseController</c> 的 <c>Lights[3]</c> 抄下來的。Brio 不擁有它、也永遠不會把 <c>_gameLight</c> 設回 null
+    /// (<see cref="Destroy"/> 對 GPose 光源整段跳過)⇒ 判空對這一族<b>完全沒有偵測力</b>:
+    /// 使用者在 GPose 介面把燈關掉之後,這個欄位還留著已經失效的位址,而 <see cref="Position"/>、
+    /// <see cref="Rotation"/> 與 LightingService.OnFrameworkUpdate 是<b>每幀</b>解參考的。
+    /// AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+    /// </para>
+    ///
+    /// <para>
+    /// 光源不在 IObjectTable 裡,所以 <c>LiveActorRef</c> 那一套用不上;但 GPose 光源有一個等價的可查詢容器 ——
+    /// 就是它當初的來源 <c>Lights[3]</c> 本身。讀那個陣列只是讀 EventFramework 這個長生單例的記憶體,
+    /// <b>不會解參考任何存下來的光源位址</b>,所以這個查詢本身永遠安全(與 IObjectTable.GetObjectAddress 同形狀)。
+    /// 槽位裡還是同一個指標才算活著;被清掉或換成別的燈都回 false。
+    /// </para>
+    /// </summary>
+    public bool IsValid
+    {
+        get
+        {
+            if(_gameLight == null)
+                return false;
+
+            // Brio 自己配的記憶體,只有 Destroy() 會釋放,而它會同時把欄位設回 null。
+            if(IsGPoseLight == false)
+                return true;
+
+            var controller = EventGPoseControllerEX.Current;
+            if(controller == null)
+                return false;
+
+            // GetLight 對 index >= LightCount 回 null,不會讀出陣列外的位元組。
+            return controller->GetLight(GposeLightIndex) == _gameLight;
+        }
+    }
 
     public GameLight* GameLight => _gameLight;
     public IntPtr Address => (nint)GameLight;
 
-    public Vector3 Position => GameLight->Transform.Position;
-    public Quaternion Rotation => GameLight->Transform.Rotation;
+    // 🔴 這兩個是每幀被讀的。光源已經沒了就不要解參考(GPose 光源由遊戲釋放,見 IsValid);
+    //    回退成原點/單位四元數,而不是踩已釋放的記憶體 —— AVE 在 .NET Core 是 corrupted-state exception,攔不到。
+    public Vector3 Position => IsValid ? GameLight->Transform.Position : Vector3.Zero;
+    public Quaternion Rotation => IsValid ? GameLight->Transform.Rotation : Quaternion.Identity;
 
     public Vector3 SpawnPosition { get; set; }
     public Quaternion SpawnRotation { get; set; }
@@ -639,7 +698,9 @@ public unsafe interface IGameLight
     public int EntityIndex { get; }
     public bool IsValid { get; }
     public bool NeedsUpdate { get; set; }
-    public bool IsVisible => GameLight != null && GameLight->LightFlags != 0;
+    // 🔴 原本只判空。GPose 光源被遊戲收掉之後 GameLight 仍然不是 null(Brio 不擁有它、也不會把欄位設回 null),
+    //    而這個屬性是在實體清單每幀畫按鈕時讀的 ⇒ 必須用 IsValid,它會去查 GPose 光源槽位。
+    public bool IsVisible => IsValid && GameLight->LightFlags != 0;
 
     public Vector3 SpawnPosition { get; set; }
     public Quaternion SpawnRotation { get; set; }
@@ -657,7 +718,14 @@ public unsafe interface IGameLight
     public uint GposeLightIndex { get; set; }
 
     public void Destroy();
-    public void ToggleLight() => GameLight->LightFlags = (byte)(GameLight->LightFlags == 0 ? 79 : 0);
+    public void ToggleLight()
+    {
+        // 使用者按下按鈕的那一刻光源可能已經沒了(GPose 面板剛把它關掉);寫入前先確認。
+        if(IsValid == false)
+            return;
+
+        GameLight->LightFlags = (byte)(GameLight->LightFlags == 0 ? 79 : 0);
+    }
 }
 
 [StructLayout(LayoutKind.Explicit)]

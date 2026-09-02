@@ -102,6 +102,12 @@ public class LightTransformCapability : LightCapability
 
     public unsafe void Reset(bool generateSnapshot = true, bool clearHistStack = true)
     {
+        // 🔴 光源可能在這個視窗還開著的時候就沒了:GPose 光源由遊戲釋放,Brio 光源由 Light.Destroy() 釋放。
+        //    IsValid 現在會真的去查 GPose 光源槽位(見 Light.IsValid),死掉就不要再解參考 ——
+        //    對已釋放/空指標寫 Transform 是 AccessViolation,在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+        if(GameLight.IsValid == false)
+            return;
+
         Transform.Position = Light.GameLight.GameLight->Transform.Position = Light.GameLight.SpawnPosition;
         Transform.Rotation = Light.GameLight.GameLight->Transform.Rotation = Light.GameLight.SpawnRotation;
         Transform.Scale = Light.GameLight.GameLight->Transform.Scale = Light.GameLight.SpawnScale;
@@ -141,6 +147,12 @@ public class LightTransformCapability : LightCapability
         rotation = state.Rotation.EulerAngles;
         position = state.Position;
         scale = state.Scale;
+
+        // 🔴 光源可能在這個視窗還開著的時候就沒了:GPose 光源由遊戲釋放,Brio 光源由 Light.Destroy() 釋放。
+        //    IsValid 現在會真的去查 GPose 光源槽位(見 Light.IsValid),死掉就不要再解參考 ——
+        //    對已釋放/空指標寫 Transform 是 AccessViolation,在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+        if(GameLight.IsValid == false)
+            return;
 
         Light.GameLight.GameLight->Transform.Position = Transform.Position = state.Position;
         Light.GameLight.GameLight->Transform.Rotation = Transform.Rotation = state.Rotation;
