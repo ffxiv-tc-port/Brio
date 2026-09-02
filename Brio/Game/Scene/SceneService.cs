@@ -153,20 +153,42 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
 
     private async Task LoadProp(EntityId actorId, ActorFile actorFile)
     {
-        var attachedActor = _entityManager.GetEntity<ActorEntity>(actorId)!;
+        // ⚠️ 本函式是 LoadScene 那個 RunUntilSatisfied 的完成回呼,最可能在建立道具之後 100 幀才跑。
+        //    使用者這段期間把道具刪掉時 GetEntity 會回 null,原本的 ! 會變成 NullReferenceException,
+        //    而呼叫端是 fire-and-forget(`_ = LoadProp(...)`)會把它靜默吞掉。改成明說並結束。
+        var attachedActor = _entityManager.GetEntity<ActorEntity>(actorId);
+        if(attachedActor is null)
+        {
+            Brio.Log.Info("場景載入:道具在準備就緒之前就已經被移除,略過套用。");
+            return;
+        }
+
         var modelCapability = attachedActor.GetCapability<ModelPosingCapability>();
         var appearanceCapability = attachedActor.GetCapability<ActorAppearanceCapability>();
 
         await _framework.RunOnTick(async () =>
         {
+            // 🔴 又過了 2 幀。modelCapability.Transform 的 getter 與 setter 都會走
+            //    ModelTransformService.GetTransform / SetTransform(GameObject) → go.Native() 解參並寫入,
+            //    而 GameObject.Address 是建構當下凍結的 ⇒ 道具已消失時就是懸空位址。
+            //    AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+            //    IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
+            if(attachedActor.IsGameObjectAlive == false)
+                return;
+
             if(actorFile.PropData is not null)
                 modelCapability.Transform += actorFile.PropData.PropTransformDifference;
 
             await _framework.RunOnTick(async () =>
             {
+                // 再過 10 幀(累計 12)。SetAppearance 內部也有同一道閘門,這裡擋的是「連叫都不要叫」。
+                if(attachedActor.IsGameObjectAlive == false)
+                    return;
+
                 await appearanceCapability.SetAppearance(actorFile.AnamnesisCharaFile, AppearanceImportOptions.Weapon);
                 await _framework.RunOnTick(() =>
                 {
+                    // 再過 10 幀(累計 22)。AttachWeapon 本體開頭已有 IsGameObjectAlive 閘門。
                     appearanceCapability.AttachWeapon();
                 }, delayTicks: 10);
             }, delayTicks: 10);
@@ -175,17 +197,39 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
 
     private async Task ApplyDataToActor(EntityId actorId, ActorFile actorFile)
     {
-        var attachedActor = _entityManager.GetEntity<ActorEntity>(actorId)!;
+        // ⚠️ 同 LoadProp:本函式是 LoadScene 那個 RunUntilSatisfied 的完成回呼,最多在建立角色之後
+        //    100 幀才跑,GetEntity 可能已經回 null(原本的 ! 會變成被 fire-and-forget 靜默吞掉的 NRE)。
+        var attachedActor = _entityManager.GetEntity<ActorEntity>(actorId);
+        if(attachedActor is null)
+        {
+            Brio.Log.Info("場景載入:角色在準備就緒之前就已經被移除,略過套用。");
+            return;
+        }
+
         var posingCapability = attachedActor.GetCapability<PosingCapability>();
         var appearanceCapability = attachedActor.GetCapability<ActorAppearanceCapability>();
         var actionTimeline = attachedActor.GetCapability<ActionTimelineCapability>();
 
-        attachedActor.FriendlyName = actorFile.Name;
+        attachedActor.FriendlyName = actorFile.Name; // 純受控狀態,不解參
+
+        // 🔴 SetOverallSpeedOverride 會寫 Character.Native()->Timeline.OverallSpeed。
+        //    本函式最快也是建立角色之後好幾十幀才跑到這裡,GameObject.Address 是建構當下凍結的
+        //    ⇒ 角色已消失時就是懸空寫入,AccessViolationException 在 .NET Core 是 corrupted-state
+        //    exception,try/catch 攔不到。IsGameObjectAlive 只讀物件表自己的指標陣列,不解參存下來的位址。
+        if(attachedActor.IsGameObjectAlive == false)
+        {
+            Brio.Log.Info("場景載入:角色已經不在物件表裡,略過套用。");
+            return;
+        }
 
         actionTimeline.SetOverallSpeedOverride(0);
 
         await _framework.RunOnTick(async () =>
         {
+            // 又過了 1 幀:SetAppearance 會整條解參 Character(內部也有同一道閘門)。
+            if(attachedActor.IsGameObjectAlive == false)
+                return;
+
             // only import shaders if the appearance is valid and it's not a prop (characters only)
             if(actorFile.AnamnesisCharaFile.IsExtendedAppearanceValid && !actorFile.IsProp)
             {
@@ -203,6 +247,14 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
 
             await _framework.RunOnTick(async () =>
             {
+                // 🔴 再過 10 幀。這一段有三處會解參 GameObject:
+                //    posingCapability.ImportPose → ActionTimelineCapability.SpeedMultiplier /
+                //      SetOverallSpeedOverride(兩者都是 Character.Native()->Timeline...)
+                //    companionCapability.SetCompanion → ActorSpawnService.CreateCompanion(Character, ...)
+                //    (延後之後的 ImportPose_Internal 自己另有閘門)
+                if(attachedActor.IsGameObjectAlive == false)
+                    return;
+
                 bool mountPose = false;
                 if(actorFile.Child is not null && actorFile.Child.Companion.Kind == Types.CompanionKind.Mount)
                     mountPose = true;
@@ -218,6 +270,12 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
 
                     await _framework.RunOnTick(() =>
                     {
+                        // 🔴 又過了 1 幀。GetCompanionAsEntity 會做 Character.HasSpawnedCompanion() 與
+                        //    &Character.Native()->CompanionObject->Character.GameObject 兩次解參,
+                        //    mountPose 那條的 ImportPose 也是。宿主已消失時全是懸空位址。
+                        if(attachedActor.IsGameObjectAlive == false)
+                            return;
+
                         if(actorFile.Child.PoseFile is not null)
                         {
                             var companionEntity = companionCapability.GetCompanionAsEntity();

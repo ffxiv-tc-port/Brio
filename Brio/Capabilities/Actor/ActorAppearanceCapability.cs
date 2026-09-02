@@ -261,7 +261,25 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     public async Task SetAppearance(ActorAppearance appearance, AppearanceImportOptions options)
     {
-        Brio.Log.Debug($"Setting appearance for gameobject {GameObject.ObjectIndex}...");
+        // 🔴 這支有好幾個呼叫端是延後 1~12 幀之後才跑的 RunOnTick 回呼
+        //    (SceneService.LoadProp / SceneService.ApplyDataToActor)。
+        //    第一行 log 的 GameObject.ObjectIndex、GetActorAppearance(Character)、
+        //    SetCharacterAppearance(Character, ...) 全部都要解參,而 GameObject.Address 是建構當下
+        //    凍結的 ⇒ 角色在那幾幀之內消失就是懸空位址,AccessViolationException 在 .NET Core 是
+        //    corrupted-state exception,try/catch 攔不到。IsGameObjectAlive 只讀物件表自己的指標陣列
+        //    (GetObjectAddress),不解參任何存下來的位址。
+        if(Actor.IsGameObjectAlive == false)
+        {
+            Brio.Log.Info("套用外觀略過:目標角色已經不在物件表裡。");
+            return;
+        }
+
+        // 上一行剛確認過物件還在表裡,這次解參安全。抄成區域變數是因為函式尾端那行 log 是在數個
+        // await 之後才跑的 —— 那時再讀一次 GameObject.ObjectIndex 就成了跨幀解參
+        // (內插字串一定會被求值,與 log 等級無關)。
+        var objectIndex = GameObject.ObjectIndex;
+
+        Brio.Log.Debug($"Setting appearance for gameobject {objectIndex}...");
 
         _originalAppearance ??= _actorAppearanceService.GetActorAppearance(Character);
         _ = await _actorAppearanceService.SetCharacterAppearance(Character, appearance, options);
@@ -281,7 +299,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
                 AttachWeapon();
             }, delayTicks: 5);
 
-        Brio.Log.Debug($"Appearance set for gameobject {GameObject.ObjectIndex}.");
+        Brio.Log.Debug($"Appearance set for gameobject {objectIndex}.");
     }
 
     public void ImportAppearance(string file, AppearanceImportOptions options)
