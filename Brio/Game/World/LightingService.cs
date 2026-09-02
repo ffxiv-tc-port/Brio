@@ -197,9 +197,17 @@ public unsafe class LightingService : IDisposable
     {
         _framework.RunOnFrameworkThread(() =>
         {
-            var gamelight = SpawnGameLight(lightType);
+            var gamelight = SpawnGameLight(lightType, out var allocationBase);
 
-            Light light = new(gamelight, gamelight->Transform.Position, gamelight->Transform.Rotation, gamelight->Transform.Scale);
+            // 🔴 SpawnGameLight 在特徵碼沒繫結上時會回 null(見那支的註解)。這裡以前直接解參,
+            //    對 null 讀 Transform 是必崩的存取違規,而且 AVE 是 corrupted-state exception 攔不到。
+            if(gamelight is null)
+            {
+                Brio.Log.Information("原生光源函式沒有繫結成功,略過生成光源。");
+                return;
+            }
+
+            Light light = new(gamelight, allocationBase, gamelight->Transform.Position, gamelight->Transform.Rotation, gamelight->Transform.Scale);
             light.SetIndex(_spawnedLights.Add(light));
 
             UpdateLight(gamelight);
@@ -225,14 +233,32 @@ public unsafe class LightingService : IDisposable
         });
     }
 
-    public unsafe GameLight* SpawnGameLight(LightType lightType)
+    /// <summary>
+    /// 配置並初始化一盞 Brio 自己的光源。原生函式沒繫結上時回 <c>null</c>,<b>呼叫端必須判空</b>。
+    ///
+    /// <para>
+    /// 🔴 <paramref name="allocationBase"/> 是 <c>Marshal.AllocHGlobal</c> 回傳的<b>未對齊基底位址</b>,
+    /// 釋放光源時<b>只能</b>用它,不可以用回傳的(已對齊的)光源指標。
+    /// <c>NativeHelpers.AllocateAlignedMemory</c> 算的位移是 <c>alignment - (base % alignment)</c>,
+    /// 值域是 <c>1..alignment</c> —— <b>永遠不會是 0</b>(基底本來就對齊時得到的是一整個 alignment)。
+    /// 所以對齊後的指標與配置基底<b>必定不同</b>,拿對齊後的指標去 <c>Marshal.FreeHGlobal</c>
+    /// 等於對堆積區塊的中間位置呼叫 <c>LocalFree</c>:堆積損壞,而且當場不會報錯,
+    /// 要等到之後某次不相干的配置才炸,現場完全指認不出來。
+    /// 光源沒生出來時這個值是 <see cref="nint.Zero"/>。
+    /// </para>
+    /// </summary>
+    public unsafe GameLight* SpawnGameLight(LightType lightType, out nint allocationBase)
     {
+        allocationBase = nint.Zero;
+
         // 原生光源函式沒繫結上時直接放棄:呼叫 null 函式指標是 AVE,try/catch 攔不到。
         if(IsLightingAvailable == false)
             return null;
 
         // This causes memory fragmentation over time I think, maybe we can implement a pooling system later?
-        GameLight* light = (GameLight*)NativeHelpers.AllocateAlignedMemory(sizeof(GameLight), 8).Aligned;
+        var allocation = NativeHelpers.AllocateAlignedMemory(sizeof(GameLight), 8);
+        allocationBase = allocation.Unaligned;
+        GameLight* light = (GameLight*)allocation.Aligned;
 
         _spawnGameLight(light);
         _spawnGameLightCreate(light);
@@ -288,9 +314,16 @@ public unsafe class LightingService : IDisposable
         _framework.RunOnFrameworkThread(() =>
         {
             // Spawn a new GameLight
-            var clonedGameLight = SpawnGameLight(sourceLight.GameLight->LightRenderObject->EmissionType);
+            var clonedGameLight = SpawnGameLight(sourceLight.GameLight->LightRenderObject->EmissionType, out var allocationBase);
 
-            Light clonedLight = new(clonedGameLight, clonedGameLight->Transform.Position, clonedGameLight->Transform.Rotation, clonedGameLight->Transform.Scale);
+            // 🔴 同 SpawnLight:特徵碼沒繫結上時 SpawnGameLight 回 null,解參就是存取違規。
+            if(clonedGameLight is null)
+            {
+                Brio.Log.Information("原生光源函式沒有繫結成功,略過複製光源。");
+                return;
+            }
+
+            Light clonedLight = new(clonedGameLight, allocationBase, clonedGameLight->Transform.Position, clonedGameLight->Transform.Rotation, clonedGameLight->Transform.Scale);
             clonedLight.SetIndex(_spawnedLights.Add(clonedLight));
 
             // Copy properties from the source light to the cloned light
@@ -383,8 +416,21 @@ public unsafe class LightingService : IDisposable
             {
                 GameLight* gameLight = igameLight.GameLight;
 
+                // 沿用既有光源時這裡是 Zero:那塊記憶體的配置基底在原本那個 Light 身上,
+                // 由它負責釋放。這個新包裝不是配置者,絕對不可以跟著釋放(會變成重複釋放)。
+                nint allocationBase = nint.Zero;
+
                 if(gameLight is null)
-                    gameLight = SpawnGameLight(lightData.LightType);
+                {
+                    gameLight = SpawnGameLight(lightData.LightType, out allocationBase);
+
+                    // 🔴 同 SpawnLight:特徵碼沒繫結上時 SpawnGameLight 回 null,解參就是存取違規。
+                    if(gameLight is null)
+                    {
+                        Brio.Log.Information("原生光源函式沒有繫結成功,略過載入光源。");
+                        return;
+                    }
+                }
 
                 // Adjust position relative to the central position if provided
                 gameLight->Transform.Position = centralPosition.HasValue
@@ -408,7 +454,7 @@ public unsafe class LightingService : IDisposable
 
                 UpdateLight(gameLight);
 
-                var light = new Light(gameLight, gameLight->Transform.Position, gameLight->Transform.Rotation, gameLight->Transform.Scale);
+                var light = new Light(gameLight, allocationBase, gameLight->Transform.Position, gameLight->Transform.Rotation, gameLight->Transform.Scale);
                 light.SetIndex(_spawnedLights.Add(light));
 
                 if(_entityManager.TryGetEntity("environment", out var ent))
@@ -584,6 +630,14 @@ public class LightData
 public unsafe class Light : IGameLight, IDisposable
 {
     private GameLight* _gameLight;
+
+    /// <summary>
+    /// 這盞光源的記憶體是<b>這個包裝</b>配出來的時候,存 <c>Marshal.AllocHGlobal</c> 的未對齊基底位址;
+    /// 否則是 <see cref="nint.Zero"/>(遊戲配的 GPose 光源、或沿用別的 <see cref="Light"/> 已經擁有的指標)。
+    /// <see cref="Destroy"/> 只有在這個值非零時才釋放記憶體 —— 見那支的註解。
+    /// </summary>
+    private readonly nint _allocationBase;
+
     private int _index;
     private int _entityIndex;
 
@@ -653,9 +707,23 @@ public unsafe class Light : IGameLight, IDisposable
     public bool IsGPoseLight { get; set; }
     public uint GposeLightIndex { get; set; }
 
+    /// <summary>
+    /// 包裝一盞<b>不是這個包裝配出來的</b>光源(遊戲的 GPose 光源,或別的 <see cref="Light"/> 已經擁有的指標)。
+    /// 這樣建出來的包裝<b>不會釋放記憶體</b>。
+    /// </summary>
     public Light(GameLight* gameLight, Vector3 position, Quaternion rotation, Vector3 scale)
+        : this(gameLight, nint.Zero, position, rotation, scale)
+    {
+    }
+
+    /// <summary>
+    /// 包裝一盞 <c>LightingService.SpawnGameLight</c> 剛配出來的光源。
+    /// <paramref name="allocationBase"/> 必須是那支交出來的<b>未對齊基底位址</b>,不是光源指標本身。
+    /// </summary>
+    public Light(GameLight* gameLight, nint allocationBase, Vector3 position, Quaternion rotation, Vector3 scale)
     {
         _gameLight = gameLight;
+        _allocationBase = allocationBase;
 
         SpawnPosition = position;
         SpawnRotation = rotation;
@@ -672,13 +740,36 @@ public unsafe class Light : IGameLight, IDisposable
         _entityIndex = entityIndex;
     }
 
+    /// <summary>
+    /// 收掉這盞光源。<b>GPose 光源整段跳過</b> —— 那一族的記憶體是遊戲配的、也由遊戲釋放,
+    /// Brio 動它就是釋放別人的堆積區塊。
+    ///
+    /// <para>
+    /// 🔴 這裡以前是 <c>NativeHelpers.FreeMemory((nint)GameLight)</c>,也就是拿<b>對齊後</b>的指標
+    /// 去呼叫 <c>Marshal.FreeHGlobal</c>。而 <c>NativeHelpers.AllocateAlignedMemory</c> 的位移
+    /// (<c>alignment - (base % alignment)</c>)值域是 <c>1..alignment</c>、<b>永遠不是 0</b>,
+    /// 所以那個指標一定落在配置區塊<b>中間</b>:每一次銷毀 Brio 自己的光源都是對 <c>base + 位移</c>
+    /// 呼叫 <c>LocalFree</c> = 堆積損壞。而且當場不報錯,要等到之後某次不相干的配置才炸。
+    /// 正解是把配置基底一路帶過來,交給 repo 裡本來就有、<c>IKService</c> 也用對了的
+    /// <c>NativeHelpers.FreeAlignedMemory</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// <c>_allocationBase</c> 是 <see cref="nint.Zero"/> 時代表這個包裝<b>不是配置者</b>
+    /// (指標是別處交進來的),那就只做原生的解構、不碰配置器 —— 對不是自己配的位址呼叫
+    /// <c>LocalFree</c> 跟上面那個 bug 是同一種傷害。
+    /// </para>
+    /// </summary>
     public void Destroy()
     {
         if(IsValid && IsGPoseLight is false)
         {
+            var allocation = ((nint)GameLight, _allocationBase);
+
             GameLight->Destroy();
 
-            NativeHelpers.FreeMemory((nint)GameLight); // Is this overkill?
+            if(_allocationBase != nint.Zero)
+                NativeHelpers.FreeAlignedMemory(allocation);
 
             _gameLight = null;
         }
