@@ -178,8 +178,9 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     public void SetDesign(Guid design)
     {
-        IsDesignOverridden = true;
-        _ = _glamourerService.ApplyDesign(design, Character);
+        // 只有 Glamourer 真的接受了這次套用才記成「已覆寫」——
+        // 否則之後的 ResetDesign 會對一個從來沒套上去的設計做還原。
+        IsDesignOverridden = _glamourerService.ApplyDesign(design, Character);
     }
     public void ResetDesign(bool checkResetLock = true)
     {

@@ -32,6 +32,7 @@ public class ActorSpawnService : IDisposable
     private readonly GPoseService _gPoseService;
     private readonly ActorRedrawService _actorRedrawService;
     private readonly GlamourerService _glamourerService;
+    private readonly PenumbraService _penumbraService;
     private readonly TargetService _targetService;
     private readonly EntityManager _entityManager;
     private readonly PosingService _posingService;
@@ -43,7 +44,7 @@ public class ActorSpawnService : IDisposable
     private readonly Dictionary<ushort, SpawnFlags> _createdIndexes = [];
 
     public unsafe ActorSpawnService(ObjectMonitorService monitorService, CustomizePlusService customizePlusService, ActorLookAtService actorLookAtService, CharacterHandlerService characterHandlerService,
-        ActorAppearanceService actorAppearanceService, PosingService posingService, GlamourerService glamourerService,
+        ActorAppearanceService actorAppearanceService, PosingService posingService, GlamourerService glamourerService, PenumbraService penumbraService,
         EntityManager entityManager, IObjectTable objectTable, IClientState clientState, IFramework framework,
         GPoseService gPoseService, ActorRedrawService actorRedrawService, TargetService targetService)
     {
@@ -54,6 +55,7 @@ public class ActorSpawnService : IDisposable
         _gPoseService = gPoseService;
         _actorRedrawService = actorRedrawService;
         _glamourerService = glamourerService;
+        _penumbraService = penumbraService;
         _targetService = targetService;
         _entityManager = entityManager;
         _posingService = posingService;
@@ -111,6 +113,12 @@ public class ActorSpawnService : IDisposable
             // We first copy the real source, then we copy ourselves onto ourselves.
             targetNative->CharacterSetup.CopyFromCharacter(sourceCharacter.Native(), copyFlags);
             targetNative->CharacterSetup.CopyFromCharacter(outCharacter.Native(), CharacterCopyFlags.None);
+
+            // 上面那兩次 CopyFromCharacter 會讓 Penumbra 把這一格當成來源角色的過場複製體,
+            // 於是集合與 Glamourer 的查詢全部導向來源角色的識別碼。Brio 角色是可以各自編輯的,
+            // 所以要在這裡切斷關聯,讓查詢落回這個角色自己身上。
+            // 索引在這一幀當場讀出來傳過去,不把 ICharacter 包裝交給別人跨幀持有。
+            _penumbraService.DetachCutsceneActor(outCharacter.ObjectIndex);
 
             // Copy position if requested
             if(flags.HasFlag(SpawnFlags.CopyPosition))
