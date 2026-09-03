@@ -28,7 +28,7 @@ public unsafe class IKService : IDisposable
         "若台服的結構比外掛假設的小,解算時會寫超出配置範圍 —— 那是堆積毀損,不一定當場崩潰。\n" +
         "使用後若遊戲出現異常,請關閉 IK 並回報。";
 
-    /// <summary>第一次啟用 IK 時印一次(Information 級,使用者的 LogLevel 2 收得到)。</summary>
+    /// <summary>第一次啟用 IK 時印一次(Information 級,使用者的 LogLevel 1 收得到)。</summary>
     public static void LogTcWarningOnce()
     {
         if(_tcWarningLogged)

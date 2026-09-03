@@ -14,7 +14,7 @@ namespace Brio.Core;
 /// 台服的執行檔與國際服不同版,特徵碼失效是常態而不是意外,
 /// 所以這裡把「找不到特徵碼」從「外掛掛掉」降級成「該功能停用」。
 ///
-/// 診斷一律寫 Information 級(使用者跑 LogLevel 2,Debug/Verbose 收不到)。
+/// 診斷一律寫 Information 級(使用者跑 LogLevel 1,盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒)。
 /// </summary>
 public static class NativeBinding
 {

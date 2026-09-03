@@ -138,7 +138,7 @@ public unsafe partial class PhysicsService : IDisposable
         return false;
     }
 
-    /// <summary>第一次真的寫入時印一次(Information 級,使用者的 LogLevel 2 收得到)。</summary>
+    /// <summary>第一次真的寫入時印一次(Information 級,使用者的 LogLevel 1 收得到)。</summary>
     private void LogTcWarningOnce()
     {
         if(_tcWarningLogged)
