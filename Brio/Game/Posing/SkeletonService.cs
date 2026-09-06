@@ -273,6 +273,16 @@ public unsafe class SkeletonService : IDisposable
         var prop = info.PropagateComponents.HasFlag(TransformComponents.Position);
         var modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
 
+        // 🔴 AccessBoneModelSpace 的回傳值在解參之前一律判空,而且每一次重新取得之後都要再判一次。
+        // 判空擋得住的是 null(NullReferenceException,攔得到);真正致命的是「非 null 但無效」,
+        // 那是 AccessViolationException —— 在 .NET Core 屬於 corrupted-state exception,try/catch 完全無效。
+        // 所以這裡的防護是結構性的「不解參、直接放棄這一格」,不是靠例外隔離。
+        if(modelSpace == null)
+        {
+            LogNullModelSpaceOnce(boneId);
+            return;
+        }
+
         // Position
         temp = modelSpace;
         temp.Position += info.Transform.Position;
@@ -283,6 +293,12 @@ public unsafe class SkeletonService : IDisposable
             if(!info.IKInfo.EnforceConstraints)
             {
                 modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
+                if(modelSpace == null)
+                {
+                    LogNullModelSpaceOnce(boneId);
+                    return;
+                }
+
                 modelSpace->Translation = *(hkVector4f*)(&temp.Position);
             }
         }
@@ -294,6 +310,12 @@ public unsafe class SkeletonService : IDisposable
         // Rotation
         prop = info.PropagateComponents.HasFlag(TransformComponents.Rotation);
         modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
+        if(modelSpace == null)
+        {
+            LogNullModelSpaceOnce(boneId);
+            return;
+        }
+
         temp = modelSpace;
         temp.Rotation *= info.Transform.Rotation;
         modelSpace->Rotation = *(hkQuaternionf*)(&temp.Rotation);
@@ -301,9 +323,32 @@ public unsafe class SkeletonService : IDisposable
         // Scale
         prop = info.PropagateComponents.HasFlag(TransformComponents.Scale);
         modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
+        if(modelSpace == null)
+        {
+            LogNullModelSpaceOnce(boneId);
+            return;
+        }
+
         temp = modelSpace;
         temp.Scale += info.Transform.Scale;
         modelSpace->Scale = *(hkVector4f*)(&temp.Scale);
+    }
+
+    private static bool _nullModelSpaceLogged;
+
+    /// <summary>
+    /// AccessBoneModelSpace 回 null 時記一次。這條路徑每幀、每根骨骼都會走到,
+    /// 所以只印第一次(Information 級,使用者的 LogLevel 1 收得到)。
+    /// </summary>
+    private static void LogNullModelSpaceOnce(int boneId)
+    {
+        if(_nullModelSpaceLogged)
+            return;
+        _nullModelSpaceLogged = true;
+
+        Brio.Log.Information(
+            $"[TC] AccessBoneModelSpace 對骨骼索引 {boneId} 回了 null,本次姿勢套用已略過。" +
+            "這一行只會印一次。若姿勢有部位套不上去,請連同本行一起回報。");
     }
 
     public void RefreshSkeletonCache()

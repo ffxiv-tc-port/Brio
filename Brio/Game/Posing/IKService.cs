@@ -22,11 +22,16 @@ public unsafe class IKService : IDisposable
 
     private static bool _tcWarningLogged;
 
-    /// <summary>UI tooltip 與 log 共用的警語(繁中)。結構大小沒對台服驗過,使用者要先知道。</summary>
+    /// <summary>
+    /// UI tooltip 與 log 共用的說明(繁中)。
+    /// 三條特徵碼與三個結構大小都已對台服 7.20 客戶端離線驗證過(2026-09-06),
+    /// 所以這裡不再宣稱「尚未驗證」—— 那句話已經是假的,留著只會白白嚇使用者。
+    /// </summary>
     public const string TcWarning =
-        "實驗功能:IK 用到的 havok 結構大小(CCDIKConstraint / TwoJointIKSetup)尚未對台服客戶端驗證過。\n" +
-        "若台服的結構比外掛假設的小,解算時會寫超出配置範圍 —— 那是堆積毀損,不一定當場崩潰。\n" +
-        "使用後若遊戲出現異常,請關閉 IK 並回報。";
+        "實驗功能:IK 解算是直接呼叫遊戲內建的 havok 解算器。\n" +
+        "三條特徵碼在台服客戶端各自唯一命中,三個結構大小也已逐欄反組譯確認:\n" +
+        "hkaCCDSolver 0x18、CCDIKConstraint 0x20(陣列步進 0x20)、TwoJointIKSetup 0x82。\n" +
+        "仍屬實驗功能:若遊戲出現異常,請關閉 IK 並回報。";
 
     /// <summary>第一次啟用 IK 時印一次(Information 級,使用者的 LogLevel 1 收得到)。</summary>
     public static void LogTcWarningOnce()
@@ -94,7 +99,16 @@ public unsafe class IKService : IDisposable
             {
                 var boneList = bone.GetBonesToDepth(twoJoint.FirstBone, true);
 
-                if(boneList.Count < twoJoint.FirstBone)
+                // 🔴 三個索引都要判,而且是 <= 不是 <。
+                // GetBonesToDepth(n) 最多回 n + 1 個,但碰到隱藏的父骨、部分骨骼邊界或根骨會提早停,
+                // 所以 Count == FirstBone 是真的會發生的 —— 而下面直接拿 FirstBone 去索引。
+                // 失敗形式是 ArgumentOutOfRangeException(不是崩潰),表現成那一幀整個姿勢套不上去。
+                if(twoJoint.FirstBone < 0 || twoJoint.SecondBone < 0 || twoJoint.EndBone < 0)
+                    return;
+
+                if(boneList.Count <= twoJoint.FirstBone
+                    || boneList.Count <= twoJoint.SecondBone
+                    || boneList.Count <= twoJoint.EndBone)
                     return;
 
                 TwoJointIKSetup* setup = (TwoJointIKSetup*)_twoJointSetupAddr.Aligned;
@@ -114,6 +128,9 @@ public unsafe class IKService : IDisposable
     {
         NativeHelpers.FreeAlignedMemory(_solverAddr);
         NativeHelpers.FreeAlignedMemory(_ccdConstraintCtrAddr);
+        // 建構子配了三塊,上游只釋放兩塊 —— 少釋放這一塊的話,每次載入/卸載外掛就漏掉
+        // 一份 TwoJointIKSetup 的配置(含對齊補償),而且是永遠拿不回來的原生記憶體。
+        NativeHelpers.FreeAlignedMemory(_twoJointSetupAddr);
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 0x18)]

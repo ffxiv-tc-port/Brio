@@ -90,9 +90,27 @@ public unsafe partial class PhysicsService : IDisposable
 
     public bool FreezeToggle() => IsFreezeEnabled ? FreezeRevert() : FreezeEnable();
 
+    // 啟用時實際寫下去的位元組。還原前拿它跟現場比對:不符就代表遊戲更新過、
+    // 或另一個外掛在凍結期間也修補了同一段程式碼,這時候把舊 bytes 寫回去會蓋掉對方的修補。
+    private static readonly byte[] _freezeNopBytes1 = [0x90, 0x90, 0x90, 0x90];
+    private static readonly byte[] _freezeNopBytes2 = [0x90, 0x90, 0x90];
+
     public bool FreezeRevert()
     {
         if(IsAvailable == false)
+            return IsFreezeEnabled = false;
+
+        // 沒凍結就沒有東西要還原。IPC 的 Brio.UnFreezePhysics 沒有 toggle 保護,會無條件走到這裡;
+        // 不早退的話下面的比對閘門會對「本來就沒被改過的現場」記一筆誤導性的 Information。
+        // 回傳值與改動前相同(兩條路徑都是 false),呼叫端行為不變。
+        if(IsFreezeEnabled == false)
+            return false;
+
+        // 寫入前的安全閘,與 FreezeEnable 同一形狀:現場必須還是我們自己寫下去的 NOP。
+        // 不符就不寫 —— 寧可讓物理維持凍結,也不要蓋掉別人的修補。
+        // (VerifyPristine 的訊息會把預期/實際的位元組都印出來,自己判讀得出來是哪一種情形。)
+        if(VerifyPristine(_freezePhysicsAddress, _freezeNopBytes1) == false
+            || VerifyPristine(_freezePhysicsAddress - 0x9, _freezeNopBytes2) == false)
             return IsFreezeEnabled = false;
 
         ReplaceRaw(_freezePhysicsAddress, _originalPhysicsBytes1);

@@ -17,7 +17,12 @@ public static class NativeHelpers
     /// </summary>
     public static (nint Aligned, nint Unaligned) AllocateAlignedMemory(int sizeInBytes, int alignment)
     {
-        int alignedSize = sizeInBytes + alignment - 1;
+        // 🔴 這裡是 + alignment,不是 + alignment - 1。
+        // 位移的值域是 1..alignment(見上面的說明),所以最壞情況要多配一整個 alignment。
+        // 少配一個位元組的後果是「從 Aligned 起算只有 sizeInBytes - 1 個位元組可以用」,
+        // 而且不是偶爾:AllocHGlobal 在 x64 恆回 16 對齊,本外掛用的 alignment 又是 8 或 16,
+        // 於是 base % alignment 恆為 0、位移恆等於一整個 alignment ⇒ 每一次配置都短一個位元組。
+        int alignedSize = sizeInBytes + alignment;
         nint unalignedMemory = Marshal.AllocHGlobal(alignedSize);
         int alignmentOffset = (int)(alignment - (unalignedMemory % alignment));
         nint alignedMemory = unalignedMemory + alignmentOffset;
