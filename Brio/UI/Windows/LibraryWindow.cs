@@ -246,7 +246,18 @@ public class LibraryWindow : Window
         }
     }
 
-    public new void Toggle()
+    /// <summary>
+    /// 開啟資料庫視窗；已經開著就關掉。
+    /// <para>
+    /// 刻意不叫 <c>Toggle</c>：基底類別 <c>Window</c> 本身就有一個 <c>Toggle()</c>，
+    /// 它不是 virtual，而且只做 <c>IsOpen ^= true</c>。原本用 <c>new</c> 遮蔽的寫法，
+    /// 會讓任何以基底型別 <c>Window</c> 持有這個視窗的呼叫端（例如走訪
+    /// <c>WindowSystem.Windows</c>，那是 <c>IReadOnlyList</c> of <c>Window</c>）靜默走到基底那一個：
+    /// 模態旗標沒被清掉、上次瀏覽的路徑與篩選器也沒還原，畫面上看起來就是
+    /// 「視窗開在別的視窗背後」或「按了沒反應」。改名之後，走錯的呼叫端在編譯期就會被抓出來。
+    /// </para>
+    /// </summary>
+    public void ToggleOpen()
     {
         if(IsOpen)
         {

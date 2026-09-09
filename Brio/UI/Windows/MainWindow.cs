@@ -132,7 +132,7 @@ public class MainWindow : Window, IDisposable
 
             ImGui.SameLine();
             if(ImBrio.Button("資料庫", FontAwesomeIcon.Book, new Vector2(line1Width, 0), centerTest: true))
-                _libraryWindow.Toggle();
+                _libraryWindow.ToggleOpen();
         }
 
         ImGui.SameLine();
