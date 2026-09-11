@@ -244,11 +244,13 @@ public class BrioIPCService : IDisposable
         Actor_Spawn_IPC?.UnregisterFunc();
         Actor_SpawnAsync_IPC?.UnregisterFunc();
         Actor_SpawnExAsync_IPC?.UnregisterFunc();
+        Actor_SpawnEx_IPC?.UnregisterFunc();
 
         Actor_DespawnActor_IPC?.UnregisterFunc();
 
         Actor_SetModelTransform_IPC?.UnregisterFunc();
         Actor_GetModelTransform_IPC?.UnregisterFunc();
+        Actor_ResetModelTransform_IPC?.UnregisterFunc();
 
         Actor_Pose_LoadFromFile_IPC?.UnregisterFunc();
         Actor_Pose_LoadFromJson_IPC?.UnregisterFunc();
@@ -272,11 +274,13 @@ public class BrioIPCService : IDisposable
         Actor_Spawn_IPC = null;
         Actor_SpawnAsync_IPC = null;
         Actor_SpawnExAsync_IPC = null;
+        Actor_SpawnEx_IPC = null;
 
         Actor_DespawnActor_IPC = null;
 
         Actor_SetModelTransform_IPC = null;
         Actor_GetModelTransform_IPC = null;
+        Actor_ResetModelTransform_IPC = null;
 
         Actor_Pose_LoadFromFile_IPC = null;
         Actor_Pose_LoadFromJson_IPC = null;
