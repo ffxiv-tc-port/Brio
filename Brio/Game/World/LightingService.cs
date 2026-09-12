@@ -242,20 +242,9 @@ public unsafe class LightingService : IDisposable
         });
     }
 
-    /// <summary>
-    /// 配置並初始化一盞 Brio 自己的光源。原生函式沒繫結上時回 <c>null</c>,<b>呼叫端必須判空</b>。
-    ///
-    /// <para>
-    /// 🔴 <paramref name="allocationBase"/> 是 <c>Marshal.AllocHGlobal</c> 回傳的<b>未對齊基底位址</b>,
-    /// 釋放光源時<b>只能</b>用它,不可以用回傳的(已對齊的)光源指標。
-    /// <c>NativeHelpers.AllocateAlignedMemory</c> 算的位移是 <c>alignment - (base % alignment)</c>,
-    /// 值域是 <c>1..alignment</c> —— <b>永遠不會是 0</b>(基底本來就對齊時得到的是一整個 alignment)。
-    /// 所以對齊後的指標與配置基底<b>必定不同</b>,拿對齊後的指標去 <c>Marshal.FreeHGlobal</c>
-    /// 等於對堆積區塊的中間位置呼叫 <c>LocalFree</c>:堆積損壞,而且當場不會報錯,
-    /// 要等到之後某次不相干的配置才炸,現場完全指認不出來。
-    /// 光源沒生出來時這個值是 <see cref="nint.Zero"/>。
-    /// </para>
-    /// </summary>
+    /// <summary>配置並初始化一盞 Brio 自己的光源。原生函式沒繫結上時回 <c>null</c>,<b>呼叫端必須判空</b>。
+    /// 🔴 <paramref name="allocationBase"/> 是 <c>Marshal.AllocHGlobal</c> 回傳的<b>未對齊基底位址</b>, 釋放光源時<b>只能</b>用它,不可以用回傳的(已對齊的)光源指標。
+    /// 光源沒生出來時這個值是 <see cref="nint.Zero"/>。</summary>
     public unsafe GameLight* SpawnGameLight(LightType lightType, out nint allocationBase)
     {
         allocationBase = nint.Zero;
@@ -492,31 +481,8 @@ public unsafe class LightingService : IDisposable
 
     /// <summary>
     /// 找出這盞光源在 <c>_lightEntities</c> 裡的槽位。找不到(從來沒有替它建過 UI 實體)時回 <c>false</c>。
-    ///
-    /// <para>
-    /// 🔴 兩支移除函式原本寫的是 <c>_lightEntities.Components[light.Index]</c>,但 <c>Index</c> 是
-    /// <c>_spawnedLights.Add()</c> 發的號碼、<c>EntityIndex</c> 才是 <c>_lightEntities.Add()</c> 發的。
-    /// 兩個 <see cref="ComponentSet{T}"/> 各自帶一份 <c>AvailableIndices</c> 空號佇列與
-    /// <c>NextAvailableIndex</c> 計數器 ⇒ <b>兩套互不相干的索引空間</b>,只有在每一次增與減都完美配對時
-    /// 才碰巧相同。一走到就永久錯開的路徑:三處「找不到 environment 實體」的 TODO 分支只往
-    /// <c>_spawnedLights</c> 加、不往 <c>_lightEntities</c> 加。另外兩支移除函式的
-    /// <c>_spawnedLights.Remove</c> 是同步的、<c>_lightEntities.Remove</c> 排在
-    /// <c>RunOnFrameworkThread</c> 裡(從 UI 繪製執行緒呼叫時會真的延後),也會暫時錯開。
-    /// 錯開之後拿 <c>Index</c> 去索引 <c>_lightEntities</c> 就是拆掉<b>別盞燈</b>的 UI 實體;
-    /// <c>Components</c> 是定長陣列,號碼超過長度則是 <see cref="IndexOutOfRangeException"/>。
-    /// </para>
-    ///
-    /// <para>
-    /// 改成用 <c>EntityIndex</c> 只解決一半:那個欄位<b>只在</b>「environment 實體找得到」的分支裡被設定,
-    /// 走過上面那三處 TODO 分支之後它停在 <c>int</c> 的預設值 <c>0</c>,一樣會指到第 0 盞燈的實體。
-    /// 所以這裡完全不靠號碼,直接拿 <see cref="LightEntity.GameLight"/> 做參考相等去認槽位 ——
-    /// 沒有對應實體時自然回 <c>false</c>,不會誤拆別人的。
-    /// </para>
-    ///
-    /// <para>
-    /// 掃描範圍是整個 <c>Components</c> 陣列,但非 null 的格子必定小於 <c>NextAvailableIndex</c>
-    /// (<c>Add</c> 只會寫在那個範圍內),所以交出去的號碼不會踩到 <c>ComponentSet.Remove</c> 的界外分支。
-    /// </para>
+    /// 🔴 兩支移除函式原本寫的是 <c>_lightEntities.Components[light.Index]</c>,但 <c>Index</c> 是 <c>_spawnedLights.Add()</c> 發的號碼、<c>EntityIndex</c> 才是 <c>_lightEntities.Add()</c> 發的。
+    /// 所以這裡完全不靠號碼,直接拿 <see cref="LightEntity.GameLight"/> 做參考相等去認槽位 —— 沒有對應實體時自然回 <c>false</c>,不會誤拆別人的。
     /// </summary>
     private bool TryFindLightEntity(IGameLight light, out int entityIndex, out LightEntity? entity)
     {
@@ -603,30 +569,10 @@ public unsafe class LightingService : IDisposable
         });
     }
 
-    /// <summary>
-    /// 每幀把 Brio 管著的光源推回渲染器。
-    ///
-    /// <para>
-    /// 🔴 條件原本是 <c>IsGPosing || IsFrameworkUnloading == false</c>。Dalamud 的
-    /// <c>Framework.HandleFrameworkDestroy</c> 是先 <c>frameworkDestroy.Cancel()</c>
-    /// (<c>IsFrameworkUnloading</c> 從此為 true)再<b>緊接著</b>把 <c>DispatchUpdateEvents</c> 設為 false,
-    /// 而 <c>Update</c> 事件只在 <c>DispatchUpdateEvents</c> 為 true 時才發送 ——
-    /// 兩者都在遊戲主執行緒上、Update 與 Destroy 兩個 hook 不會交錯,
-    /// 所以<b>在 Update 處理常式裡 <c>IsFrameworkUnloading</c> 恆為 false</b>。
-    /// 於是舊式的右半恆真 ⇒ 整條恆真 ⇒ <c>IsGPosing</c> 完全沒有作用;
-    /// 而它唯一能讓右半變 false 的情況(卸載中)反而要靠左半的 <c>IsGPosing</c> 把迴圈<b>打開</b>,
-    /// 正好是那個卸載檢查想擋的事。原意是 <c>&amp;&amp;</c>。
-    /// </para>
-    ///
-    /// <para>
-    /// 改成 <c>&amp;&amp;</c> 之後「不在 GPose」就整段不跑,這是安全的:光源只能在 GPose 中生出來
-    /// (<c>EnvironmentContainerEntity.DrawContextButton</c> 與 <c>LightContainerCapability.IsAllowed</c>
-    /// 兩個入口都用 <c>IsGPosing</c> 鎖住),而離開 GPose 時 <c>OnGPoseStateChange(false)</c> 會
-    /// <c>DestroyAllLights()</c> 清空 <c>_spawnedLights</c>。也就是說正常路徑上「不在 GPose」時
-    /// 本來就沒有東西要更新;真的有燈沒清乾淨時,停止每幀去解參考遊戲可能已經收回的記憶體才是對的。
-    /// <c>IsGPosing</c> 含 Brio 自己的 <c>FakeGPose</c>,所以假 GPose 模式不受影響。
-    /// </para>
-    /// </summary>
+    /// <summary>每幀把 Brio 管著的光源推回渲染器。
+    /// 改成 <c>&amp;&amp;</c> 之後「不在 GPose」就整段不跑,這是安全的:光源只能在 GPose 中生出來,而離開 GPose 時 <c>OnGPoseStateChange(false)</c> 會 <c>DestroyAllLights()</c> 清空 <c>_spawnedLights</c>。
+    /// 真的有燈沒清乾淨時,停止每幀去解參考遊戲可能已經收回的記憶體才是對的。
+    /// <c>IsGPosing</c> 含 Brio 自己的 <c>FakeGPose</c>,所以假 GPose 模式不受影響。</summary>
     private void OnFrameworkUpdate(IFramework framework)
     {
         if(_gPoseService.IsGPosing && framework.IsFrameworkUnloading == false)
@@ -671,8 +617,7 @@ public struct EventGPoseControllerEX
 
     /// <summary>
     /// 目前的 GPose 光源控制器,取不到時為 <c>null</c>。
-    /// EventFramework 是長生單例、EventSceneModule 與 EventGPoseController 都是內嵌欄位,
-    /// 所以這個指標的壽命跟遊戲行程一樣長 —— 但 <c>Instance()</c> 在還沒建立前會是 null,
+    /// EventFramework 是長生單例、EventSceneModule 與 EventGPoseController 都是內嵌欄位, 所以這個指標的壽命跟遊戲行程一樣長 —— 但 <c>Instance()</c> 在還沒建立前會是 null,
     /// 對 null 取欄位位址不會當場崩,回傳的指標一解參考才是 AVE,所以這裡先擋掉。
     /// </summary>
     public static unsafe EventGPoseControllerEX* Current
@@ -731,31 +676,10 @@ public unsafe class Light : IGameLight, IDisposable
     public int Index => _index;
     public int EntityIndex => _entityIndex;
 
-    /// <summary>
-    /// 這個光源現在還能不能解參考。<b>兩種光源的存活判定不一樣,不要合併。</b>
-    ///
-    /// <para>
-    /// <b>Brio 自己生的光源</b>(<see cref="IsGPoseLight"/> 為 false):記憶體是 LightingService.SpawnGameLight 裡
-    /// <c>Marshal.AllocHGlobal</c> 配出來的,全外掛只有 <see cref="Destroy"/> 會釋放它,而且釋放的同一個
-    /// 區塊裡就把 <c>_gameLight</c> 設回 null。沒有第三方能在我們背後把它收掉 ⇒ 判空就是正確的存活判定。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔴 <b>GPose 光源</b>(<see cref="IsGPoseLight"/> 為 true):記憶體是<b>遊戲</b>配的,指標是從
-    /// <c>EventGPoseController</c> 的 <c>Lights[3]</c> 抄下來的。Brio 不擁有它、也永遠不會把 <c>_gameLight</c> 設回 null
-    /// (<see cref="Destroy"/> 對 GPose 光源整段跳過)⇒ 判空對這一族<b>完全沒有偵測力</b>:
-    /// 使用者在 GPose 介面把燈關掉之後,這個欄位還留著已經失效的位址,而 <see cref="Position"/>、
-    /// <see cref="Rotation"/> 與 LightingService.OnFrameworkUpdate 是<b>每幀</b>解參考的。
-    /// AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
-    /// </para>
-    ///
-    /// <para>
-    /// 光源不在 IObjectTable 裡,所以 <c>LiveActorRef</c> 那一套用不上;但 GPose 光源有一個等價的可查詢容器 ——
-    /// 就是它當初的來源 <c>Lights[3]</c> 本身。讀那個陣列只是讀 EventFramework 這個長生單例的記憶體,
-    /// <b>不會解參考任何存下來的光源位址</b>,所以這個查詢本身永遠安全(與 IObjectTable.GetObjectAddress 同形狀)。
-    /// 槽位裡還是同一個指標才算活著;被清掉或換成別的燈都回 false。
-    /// </para>
-    /// </summary>
+    /// <summary>這個光源現在還能不能解參考。<b>兩種光源的存活判定不一樣,不要合併。</b>
+    /// <b>Brio 自己生的光源</b>(<see cref="IsGPoseLight"/> 為 false):沒有第三方能在我們背後把它收掉 ⇒ 判空就是正確的存活判定。
+    /// 🔴 <b>GPose 光源</b>(<see cref="IsGPoseLight"/> 為 true):判空對這一族<b>完全沒有偵測力</b>。
+    /// 但 GPose 光源有一個等價的可查詢容器 —— 就是它當初的來源 <c>Lights[3]</c> 本身。槽位裡還是同一個指標才算活著;被清掉或換成別的燈都回 false。</summary>
     public bool IsValid
     {
         get
@@ -827,25 +751,8 @@ public unsafe class Light : IGameLight, IDisposable
         _entityIndex = entityIndex;
     }
 
-    /// <summary>
-    /// 收掉這盞光源。<b>GPose 光源整段跳過</b> —— 那一族的記憶體是遊戲配的、也由遊戲釋放,
-    /// Brio 動它就是釋放別人的堆積區塊。
-    ///
-    /// <para>
-    /// 🔴 這裡以前是 <c>NativeHelpers.FreeMemory((nint)GameLight)</c>,也就是拿<b>對齊後</b>的指標
-    /// 去呼叫 <c>Marshal.FreeHGlobal</c>。而 <c>NativeHelpers.AllocateAlignedMemory</c> 的位移
-    /// (<c>alignment - (base % alignment)</c>)值域是 <c>1..alignment</c>、<b>永遠不是 0</b>,
-    /// 所以那個指標一定落在配置區塊<b>中間</b>:每一次銷毀 Brio 自己的光源都是對 <c>base + 位移</c>
-    /// 呼叫 <c>LocalFree</c> = 堆積損壞。而且當場不報錯,要等到之後某次不相干的配置才炸。
-    /// 正解是把配置基底一路帶過來,交給 repo 裡本來就有、<c>IKService</c> 也用對了的
-    /// <c>NativeHelpers.FreeAlignedMemory</c>。
-    /// </para>
-    ///
-    /// <para>
-    /// <c>_allocationBase</c> 是 <see cref="nint.Zero"/> 時代表這個包裝<b>不是配置者</b>
-    /// (指標是別處交進來的),那就只做原生的解構、不碰配置器 —— 對不是自己配的位址呼叫
-    /// <c>LocalFree</c> 跟上面那個 bug 是同一種傷害。
-    /// </para>
+    /// <summary>收掉這盞光源。<b>GPose 光源整段跳過</b> —— 那一族的記憶體是遊戲配的、也由遊戲釋放, Brio 動它就是釋放別人的堆積區塊。
+    /// <c>_allocationBase</c> 是 <see cref="nint.Zero"/> 時代表這個包裝<b>不是配置者</b> (指標是別處交進來的),那就只做原生的解構、不碰配置器。
     /// </summary>
     public void Destroy()
     {
