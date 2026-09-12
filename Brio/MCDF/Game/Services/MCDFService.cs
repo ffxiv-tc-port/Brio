@@ -60,6 +60,12 @@ public class MCDFService : IDisposable
     public static readonly IImmutableList<string> AllowedFileExtensions = [".mdl", ".tex", ".mtrl", ".tmb", ".pap", ".avfx", ".atex", ".sklb", ".eid", ".phyb", ".pbd", ".scd", ".skp", ".shpk", ".kdb"];
 
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly IObjectTable _objectTable;
     private readonly TargetService _targetService;
     private readonly ConfigurationService _configurationService;
@@ -97,6 +103,7 @@ public class MCDFService : IDisposable
         PenumbraService penumbraService, TransientResourceService transientResourceService, GlamourerService glamourerService, CustomizePlusService customizePlusService)
     {
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _objectTable = objectTable;
         _configurationService = configurationService;
         _fileCacheService = fileCacheService;
@@ -485,7 +492,7 @@ public class MCDFService : IDisposable
     /// 呼叫端拿著的是好幾幀前的包裝時回 <c>null</c>,不會踩到懸空位址。
     /// </summary>
     private async Task<McdfExportActor?> CaptureActorAsync(IGameObject? gameObject)
-        => await _framework.RunOnFrameworkThread(() => CaptureActor(gameObject)).ConfigureAwait(false);
+        => await _gate.RunAsync<McdfExportActor?>("MCDF.CaptureActor", () => CaptureActor(gameObject), null).ConfigureAwait(false);
 
     private McdfExportActor? CaptureActor(IGameObject? gameObject)
     {
@@ -535,11 +542,13 @@ public class MCDFService : IDisposable
     /// </summary>
     private async Task<T> WithLiveActorAsync<T>(McdfExportActor actor, string stage, Func<IGameObject, T> read)
     {
-        var result = await _framework.RunOnFrameworkThread(() =>
+        // 卸載期回 (false, ...)，與「角色已經不在」走的是同一條路：擲 McdfExportActorLostException
+        // 中止整份匯出。🔴 不可以回 (true, default)，那會寫出一個內容是空的 MCDF 檔。
+        var result = await _gate.RunAsync<(bool, T)>("MCDF.WithLiveActor", () =>
         {
             var live = ResolveExportActor(actor);
             return live is null ? (false, default(T)!) : (true, read(live));
-        }).ConfigureAwait(false);
+        }, (false, default(T)!)).ConfigureAwait(false);
 
         if(result.Item1 == false)
             throw new McdfExportActorLostException(ActorLostMessage(actor, stage));
@@ -552,7 +561,7 @@ public class MCDFService : IDisposable
 
     private async Task<IGameObject> ResolveExportActorOrThrowAsync(McdfExportActor actor, string stage)
     {
-        var live = await _framework.RunOnFrameworkThread(() => ResolveExportActor(actor)).ConfigureAwait(false);
+        var live = await _gate.RunAsync<IGameObject?>("MCDF.ResolveExportActor", () => ResolveExportActor(actor), null).ConfigureAwait(false);
         if(live is null)
             throw new McdfExportActorLostException(ActorLostMessage(actor, stage));
 
@@ -757,7 +766,8 @@ public class MCDFService : IDisposable
 
     private async Task<bool> CheckForNullDrawObject(McdfExportActor actor)
     {
-        return await _framework.RunOnFrameworkThread(() => CheckForNullDrawObjectUnsafe(actor)).ConfigureAwait(false);
+        // 卸載期回 true，與唯一呼叫端的 catch 在「讀不到」時設的 pointerIsZero = true 一致。
+        return await _gate.RunAsync("MCDF.CheckForNullDrawObject", () => CheckForNullDrawObjectUnsafe(actor), true).ConfigureAwait(false);
     }
 
     // 原本這支收的是一個裸 IntPtr,而那個位址是好幾幀之前從包裝物件讀出來的 ——
@@ -794,7 +804,7 @@ public class MCDFService : IDisposable
         int totalWaitTime = 10000;
         while(totalWaitTime > 0)
         {
-            var present = await _framework.RunOnFrameworkThread(() => ResolveExportActor(actor) is not null).ConfigureAwait(false);
+            var present = await _gate.RunAsync("MCDF.WaitForActorPresent", () => ResolveExportActor(actor) is not null, false).ConfigureAwait(false);
             if(present)
                 break;
 
@@ -967,7 +977,7 @@ public class MCDFService : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var skeletonIndices = await _framework.RunOnFrameworkThread(() => GetBoneIndicesFromPap(file.Hash)).ConfigureAwait(false);
+            var skeletonIndices = await _gate.RunAsync<Dictionary<string, List<ushort>>?>("MCDF.GetBoneIndicesFromPap", () => GetBoneIndicesFromPap(file.Hash), null).ConfigureAwait(false);
             bool validationFailed = false;
             if(skeletonIndices != null)
             {

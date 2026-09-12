@@ -57,6 +57,36 @@ public sealed class IpcFrameworkGate(IFramework framework)
     private readonly IFramework _framework = framework;
 
     /// <summary>
+    /// 非同步轉派點的共用入口。<b>沒有在卸載期時行為與直接呼叫
+    /// <c>IFramework.RunOnFrameworkThread</c> 逐字相同</b>：同一個工作物件、
+    /// 同一種例外、已經在 framework 執行緒上時就地執行、不多花任何一幀。
+    /// 唯一的差別是卸載期從別的執行緒進來時<b>不執行</b> <paramref name="body"/>，
+    /// 直接回 <paramref name="unavailable"/>（理由見 <see cref="ShouldBypassForUnloading"/>）。
+    /// </summary>
+    /// <param name="context">出現在診斷訊息裡的來源名稱，同時是節流表的鍵。</param>
+    /// <param name="unavailable">
+    /// 卸載期要回的「做不到」值。🔴 一律沿用該呼叫點<b>原本失敗時就會回的那個值</b>，
+    /// 這樣呼叫端看到的值域一個都沒有變寬，回傳型別也一個都不用改。
+    /// </param>
+    public Task<T> RunAsync<T>(string context, Func<T> body, T unavailable)
+        => ShouldBypassForUnloading(context) ? Task.FromResult(unavailable) : _framework.RunOnFrameworkThread(body);
+
+    /// <summary>沒有回傳值的版本。卸載期什麼都不做（原本也只是「做了就做了」的副作用）。</summary>
+    public Task RunAsync(string context, Action body)
+        => ShouldBypassForUnloading(context) ? Task.CompletedTask : _framework.RunOnFrameworkThread(body);
+
+    /// <summary>
+    /// <paramref name="body"/> 本身就是非同步的版本。
+    /// 🔴 名字刻意與 <see cref="RunAsync{T}(string, Func{T}, T)"/> 不同：
+    /// <c>Func&lt;Task&lt;T&gt;&gt;</c> 兩個多載都吃得下（T 各自綁成 <c>Task&lt;T&gt;</c> 與 <c>T</c>），
+    /// 同名會變成呼叫端無法解析的歧義。
+    /// 📌 用無延遲的 <c>RunOnTick</c> 而不是 <c>RunOnFrameworkThread(Func&lt;Task&lt;T&gt;&gt;)</c>：
+    /// 後者在本 pin 標了 <c>[Obsolete]</c>，而無延遲的 <c>RunOnTick</c> 本來就是直接轉呼叫前者的非過時版。
+    /// </summary>
+    public Task<T> RunTaskAsync<T>(string context, Func<Task<T>> body, T unavailable)
+        => ShouldBypassForUnloading(context) ? Task.FromResult(unavailable) : _framework.RunOnTick(body);
+
+    /// <summary>
     /// 有回傳值的端點。<paramref name="unavailable"/> 是逾時／卸載期要回的「不可用」值，
     /// 一律沿用該端點原本失敗時就會回的那個值。
     /// </summary>

@@ -55,6 +55,12 @@ public class CustomizePlusService : BrioIPC
     private readonly DalamudService _dalamudService;
     private readonly EntityManager _entityManager;
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
 
     private readonly ICallGateSubscriber<ushort, string, (int, Guid?)> _customizeplusSetTemporaryProfile;
     private readonly ICallGateSubscriber<IList<IPCProfileDataTuple>> _customizeplusGetAllProfiles;
@@ -71,6 +77,7 @@ public class CustomizePlusService : BrioIPC
         _pluginInterface = pluginInterface;
         _configurationService = configurationService;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _commandManager = commandManager;
         _dalamudService = dalamudService;
         _entityManager = entityManager;
@@ -160,7 +167,7 @@ public class CustomizePlusService : BrioIPC
     {
         if(IsAvailable == false) return null;
 
-        return await _framework.RunOnFrameworkThread(() =>
+        return await _gate.RunAsync<Guid?>("CustomizePlus.SetBodyScale", () =>
         {
             if(gameObj is ICharacter c)
             {
@@ -178,14 +185,14 @@ public class CustomizePlusService : BrioIPC
             }
 
             return null;
-        }).ConfigureAwait(false);
+        }, null).ConfigureAwait(false);
     }
 
     public async Task<string?> GetScaleAsync(IGameObject gameObj)
     {
         if(IsAvailable == false) return null;
 
-        var scale = await _framework.RunOnFrameworkThread(() =>
+        var scale = await _gate.RunAsync<string?>("CustomizePlus.GetScale", () =>
         {
             if(gameObj is ICharacter c)
             {
@@ -216,7 +223,7 @@ public class CustomizePlusService : BrioIPC
             }
 
             return string.Empty;
-        }).ConfigureAwait(false);
+        }, null).ConfigureAwait(false);
         if(string.IsNullOrEmpty(scale)) return string.Empty;
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(scale));
     }

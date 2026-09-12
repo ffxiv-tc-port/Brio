@@ -2,6 +2,7 @@
 using Brio.Files;
 using Brio.Game.GPose;
 using Brio.Game.Scene;
+using Brio.IPC;
 using Brio.MCDF.Game.Services;
 using Brio.Resources;
 using Brio.UI;
@@ -20,6 +21,12 @@ public class AutoSaveService : IDisposable
 {
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly GPoseService _gPoseService;
     private readonly SceneService _sceneService;
     private readonly MCDFService _mCDFService;
@@ -30,6 +37,7 @@ public class AutoSaveService : IDisposable
     {
         _pluginInterface = pluginInterface;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _gPoseService = gPoseService;
         _sceneService = sceneService;
         _mCDFService = mCDFService;
@@ -72,7 +80,7 @@ public class AutoSaveService : IDisposable
     private void OnElapsed(object? sender, ElapsedEventArgs e)
     {
         if(IsEnabled)
-            _framework.RunOnFrameworkThread(AutoSave);
+            _gate.RunAsync("AutoSaveService.OnElapsed", AutoSave);
     }
 
     private void AutoSave()

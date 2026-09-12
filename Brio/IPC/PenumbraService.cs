@@ -51,6 +51,12 @@ public class PenumbraService : BrioIPC
     private readonly ConfigurationService _configurationService;
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
 
     //private readonly GetEnabledState _penumbraEnabled;
     private readonly ApiVersion _penumbraApiVersion;
@@ -96,6 +102,7 @@ public class PenumbraService : BrioIPC
         _pluginInterface = pluginInterface;
         _configurationService = configurationService;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
 
         _penumbraInitializedSubscriber = Initialized.Subscriber(_pluginInterface, OnConfigurationChanged);
         _penumbraDisposedSubscriber = Disposed.Subscriber(_pluginInterface, OnConfigurationChanged);
@@ -260,11 +267,11 @@ public class PenumbraService : BrioIPC
     {
         if(IsAvailable == false) return null;
 
-        return await _framework.RunOnFrameworkThread(() =>
+        return await _gate.RunAsync<Dictionary<string, HashSet<string>>?>("Penumbra.GetGameObjectResourcePaths", () =>
         {
             Brio.Log.Debug("Calling On IPC: Penumbra.GetGameObjectResourcePaths");
             return _penumbraResourcePaths.Invoke(objectIndex)[0];
-        }).ConfigureAwait(false);
+        }, null).ConfigureAwait(false);
     }
 
     public async Task<Dictionary<string, HashSet<string>>?> GetCharacterData(IGameObject gameObject)
@@ -362,7 +369,7 @@ public class PenumbraService : BrioIPC
         var redrawType = RedrawType.Redraw;
         if(afterGPose) redrawType = RedrawType.AfterGPose;
 
-        await _framework.RunOnFrameworkThread(() =>
+        await _gate.RunAsync("Penumbra.RedrawObject", () =>
         {
             _penumbraRedraw!.Invoke(gameObject.ObjectIndex, setting: redrawType);
         });

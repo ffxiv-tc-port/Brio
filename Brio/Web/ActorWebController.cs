@@ -1,6 +1,7 @@
 ﻿using Brio.Game.Actor;
 using Brio.Game.Actor.Extensions;
 using Brio.Game.Core;
+using Brio.IPC;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using EmbedIO;
@@ -17,13 +18,20 @@ public class ActorWebController(IFramework framework, ActorSpawnService actorSpa
     private readonly ActorSpawnService _actorSpawnService = actorSpawnService;
     private readonly ActorRedrawService _redrawService = redrawService;
 
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate = new(framework);
+
     [Route(HttpVerbs.Post, "/redraw")]
     public async Task<string> RedrawActor([JsonData] RedrawRequest data)
     {
         Brio.Log.Debug("Received redraw request on WebAPI");
         try
         {
-            var result = await _framework.RunOnTick(async () => await _redrawService.RedrawObjectByIndex(data.ObjectIndex));
+            var result = await _gate.RunTaskAsync("WebAPI /redraw", () => _redrawService.RedrawObjectByIndex(data.ObjectIndex), ActorRedrawService.RedrawResult.Failed);
             return result.ToString();
         }
         catch
@@ -40,7 +48,7 @@ public class ActorWebController(IFramework framework, ActorSpawnService actorSpa
         try
         {
             ICharacter? character = null;
-            var res = await _framework.RunOnFrameworkThread(() =>
+            var res = await _gate.RunAsync("WebAPI /spawn", () =>
             {
                 if(_actorSpawnService.CreateCharacter(out ICharacter? chara, SpawnFlags.Default))
                 {
@@ -49,7 +57,7 @@ public class ActorWebController(IFramework framework, ActorSpawnService actorSpa
                     return chara.ObjectIndex;
                 }
                 return -1;
-            });
+            }, -1);
 
             if(character is not null)
             {
@@ -94,7 +102,7 @@ public class ActorWebController(IFramework framework, ActorSpawnService actorSpa
         Brio.Log.Debug("Received despawn request on WebAPI");
         try
         {
-            var didDestroy = await _framework.RunOnFrameworkThread(() => _actorSpawnService.DestroyObject(data.ObjectIndex));
+            var didDestroy = await _gate.RunAsync("WebAPI /despawn", () => _actorSpawnService.DestroyObject(data.ObjectIndex), false);
             return didDestroy;
         }
         catch

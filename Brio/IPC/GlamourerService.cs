@@ -39,6 +39,12 @@ public class GlamourerService : BrioIPC
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly ActorRedrawService _redrawService;
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly ICommandManager _commandManager;
     private readonly IObjectTable _gameObjects;
     private readonly DalamudService _dalamudService;
@@ -71,6 +77,7 @@ public class GlamourerService : BrioIPC
         _pluginInterface = pluginInterface;
         _configurationService = configurationService;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _redrawService = redrawService;
         _commandManager = commandManager;
         _dalamudService = dalamudService;
@@ -236,7 +243,7 @@ public class GlamourerService : BrioIPC
 
         try
         {
-            return await _framework.RunOnFrameworkThread(() =>
+            return await _gate.RunAsync("Glamourer.GetCharacterCustomization", () =>
             {
                 // 🔴 character 是呼叫端好幾幀之前讀出來的位址,而 CreateObjectReference 會解參考它去讀 ObjectKind
                 //    (本 pin 的 Dalamud ObjectTable.cs:155-156)。角色已消失的話那就是懸空讀,try/catch 攔不到。
@@ -251,7 +258,7 @@ public class GlamourerService : BrioIPC
                     return _glamourerGetAllCustomization!.Invoke(c.ObjectIndex).Item2 ?? string.Empty;
                 }
                 return string.Empty;
-            }).ConfigureAwait(false);
+            }, string.Empty).ConfigureAwait(false);
         }
         catch
         {

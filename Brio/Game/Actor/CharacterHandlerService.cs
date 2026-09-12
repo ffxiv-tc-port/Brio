@@ -20,6 +20,12 @@ public record CharacterHolder(ulong GameObjectId, Guid? CPlusID, string Name);
 public class CharacterHandlerService : IDisposable
 {
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly IObjectTable _objectTable;
     private readonly ActorRedrawService _redrawService;
     private readonly GPoseService _gPoseService;
@@ -37,6 +43,7 @@ public class CharacterHandlerService : IDisposable
         PenumbraService penumbraService, GlamourerService glamourerService, CustomizePlusService customizePlusService)
     {
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _objectTable = objectTable;
         _redrawService = redrawService;
         _gPoseService = gPoseService;
@@ -70,7 +77,7 @@ public class CharacterHandlerService : IDisposable
         // holder 只帶 id,要用的當下才重查物件表。SearchById 要求主執行緒,
         // 已經在 framework 執行緒上時 RunOnFrameworkThread 會就地同步執行(不會排隊,不會卡住呼叫端)。
         var gameObject = mCDFCharacterHolder.GameObjectId != 0
-            ? await _framework.RunOnFrameworkThread(() => _objectTable.SearchById(mCDFCharacterHolder.GameObjectId)).ConfigureAwait(false)
+            ? await _gate.RunAsync<IGameObject?>("CharacterHandlerService.RevertMCDF", () => _objectTable.SearchById(mCDFCharacterHolder.GameObjectId), null).ConfigureAwait(false)
             : null;
 
         if(gameObject is null)

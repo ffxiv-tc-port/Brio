@@ -1,5 +1,6 @@
 ﻿using Brio.Game.Actor.Extensions;
 using Brio.Game.Core;
+using Brio.IPC;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using System;
@@ -17,6 +18,13 @@ public class ActorRedrawService(IFramework framework, IObjectTable objectTable)
 
     private readonly IFramework _framework = framework;
     private readonly IObjectTable _objectTable = objectTable;
+
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate = new(framework);
 
     public Task<RedrawResult> RedrawObjectByIndex(int objectIndex)
     {
@@ -104,7 +112,9 @@ public class ActorRedrawService(IFramework framework, IObjectTable objectTable)
             bool stillAlive = true;
             do
             {
-                var state = await _framework.RunOnFrameworkThread(() => GetDrawState(actorRef));
+                // 卸載期回 (false, false)，與 GetDrawState 自己在「物件已經不在」時回的值相同：
+                // stillAlive 變 false，迴圈自然結束。
+                var state = await _gate.RunAsync<(bool Alive, bool Drawing)>("ActorRedrawService.RedrawAndWait", () => GetDrawState(actorRef), (false, false));
 
                 if(state.Drawing)
                 {
