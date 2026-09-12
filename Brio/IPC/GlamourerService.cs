@@ -220,9 +220,29 @@ public class GlamourerService : BrioIPC
         }
     }
 
+    /// <summary>
+    /// 透過角色名字還原 Glamourer 狀態並解鎖。
+    /// </summary>
+    /// <remarks>
+    /// 🔴 進場條件原本寫 <c>if((IsAvailable) || _dalamudService.IsZoning) return;</c> —— 少一個 <c>!</c>。
+    /// 三個相鄰的孿生方法方向都相反:非同步版 <see cref="RevertByNameAsync"/> 是 <c>if((!IsAvailable) || …)</c>、
+    /// <see cref="ApplyAllAsync"/> 與 <see cref="UnlockAndRevertCharacterByName"/> 都是
+    /// <c>IsAvailable == false</c> 才提前 return。
+    /// <para>
+    /// 寫反之後兩個方向都是壞的:Glamourer <b>在</b>的時候什麼都不做直接 return(該還原的沒還原);
+    /// Glamourer <b>不在</b>的時候反而照樣去 Invoke 它的 IPC 端點,擲例外之後被下面的 catch
+    /// 收成一行 Warning。也就是說這支不論如何都不會成功還原。
+    /// </para>
+    /// <para>
+    /// 📌 可達性:本方法目前<b>零行為變化</b>。唯一的呼叫端是 <see cref="RevertByNameAsync"/>,
+    /// 而那支在全 repo 也是零呼叫端;Brio 對外的 CallGate 端點全在 <c>BrioIPCService</c>,
+    /// 那個檔對 Glamourer 零命中 ⇒ 別的外掛也打不到這裡。修它的意義是:這兩支是 public API,
+    /// 哪天被接上(MCDF 還原流程本來就該用它)時不會帶著一個只會寫 Warning 的沉默失敗。
+    /// </para>
+    /// </remarks>
     public void RevertByName(string name, Guid applicationId)
     {
-        if((IsAvailable) || _dalamudService.IsZoning) return;
+        if((!IsAvailable) || _dalamudService.IsZoning) return;
 
         try
         {
