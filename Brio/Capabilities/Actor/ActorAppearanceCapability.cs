@@ -480,6 +480,19 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     private unsafe void ApplyShaderOverride()
     {
+        // 🔴 兩個呼叫端都在 await 之後(本檔 SetAppearance 與 Redraw),而中間那次
+        //    SetCharacterAppearance／Redraw 會等完整重繪(最多 200 幀)。角色在那段期間
+        //    消失(換區、退出 GPose、角色被刪)之後,Character 的位址指向的是已釋放的記憶體 ——
+        //    GetShaderParams() 會解 ICharacter 的原生指標再寫入 ShaderParams,踩下去就是
+        //    AccessViolationException(在 .NET Core 是 corrupted-state exception,try/catch
+        //    攔不到)。回到框架執行緒防不了這件事,一定要先由物件表確認它還在。
+        //    IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參存下來的位址。
+        if(Actor.IsGameObjectAlive == false)
+        {
+            Brio.Log.Information("角色在重繪期間消失,略過外觀套用(著色器覆寫)。");
+            return;
+        }
+
         var shaders = Character.GetShaderParams();
         if(shaders != null)
         {

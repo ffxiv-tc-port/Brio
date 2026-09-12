@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Game.Core;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -51,6 +52,8 @@ public class PenumbraService : BrioIPC
     private readonly ConfigurationService _configurationService;
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly IFramework _framework;
+    /// <summary>存活檢查用。只讀物件表自己的指標陣列,不解參任何存下來的位址。</summary>
+    private readonly IObjectTable _objectTable;
     /// <summary>
     /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
     /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
@@ -97,11 +100,12 @@ public class PenumbraService : BrioIPC
     private readonly GetPlayerMetaManipulations _penumbraGetMetaManipulations;
     //private readonly ConvertTextureFile _penumbraConvertTextureFile;
 
-    public PenumbraService(IDalamudPluginInterface pluginInterface, IFramework framework, ConfigurationService configurationService)
+    public PenumbraService(IDalamudPluginInterface pluginInterface, IFramework framework, IObjectTable objectTable, ConfigurationService configurationService)
     {
         _pluginInterface = pluginInterface;
         _configurationService = configurationService;
         _framework = framework;
+        _objectTable = objectTable;
         _gate = new IpcFrameworkGate(framework);
 
         _penumbraInitializedSubscriber = Initialized.Subscriber(_pluginInterface, OnConfigurationChanged);
@@ -396,8 +400,21 @@ public class PenumbraService : BrioIPC
         var redrawType = RedrawType.Redraw;
         if(afterGPose) redrawType = RedrawType.AfterGPose;
 
+        // 🔴 只抄走位址,不解參:兩個呼叫端都在 await 之後把包裝交進來
+        //    (CharacterHandlerService.Revert 先 await 了最長 3 秒的 RedrawAndWait,
+        //    RevertMCDF 則是 await 過物件表重查),而 IGameObject.Address 是建構當下凍結的。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, gameObject.Address);
+
         await _gate.RunAsync("Penumbra.RedrawObject", () =>
         {
+            // 🔴 存活檢查:gameObject.ObjectIndex 是解參(原生偏移 0x8C),角色已經離開物件表時
+            //    讀的是已釋放的記憶體,而且讀到的垃圾索引會讓 Penumbra 去重繪別人。
+            if(actorRef.IsAlive == false)
+            {
+                Brio.Log.Information("角色已經不在物件表裡,略過 Penumbra 重繪。");
+                return;
+            }
+
             _penumbraRedraw!.Invoke(gameObject.ObjectIndex, setting: redrawType);
         });
     }

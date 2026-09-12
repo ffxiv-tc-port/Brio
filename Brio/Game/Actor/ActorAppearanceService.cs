@@ -100,6 +100,13 @@ public class ActorAppearanceService : IDisposable
 
     public async Task<RedrawResult> Redraw(ICharacter character, bool revert)
     {
+        // 🔴 只抄走位址,不解參:呼叫端不一定是在「取得 character 的那一幀」進來的
+        //    (ActorAppearanceCapability.Redraw 自己就在 await 鏈上),而 IGameObject.Address
+        //    是建構當下凍結的、永不重新解析。FromAddress 只讀包裝物件自己的 Address 欄位,
+        //    每次查詢再由物件表比一次指標(GetObjectAddress 只讀物件表自己的指標陣列),
+        //    所以這個存活檢查本身永遠安全。做法與 ActorRedrawService.Redraw 相同。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, character.Address);
+
         if(revert)
             await _characterHandlerService.Revert(character);
 
@@ -113,7 +120,22 @@ public class ActorAppearanceService : IDisposable
         //    閘門在已經是框架執行緒時就地執行,行為逐字不變、不多花任何一幀。
         //    卸載期回 null ⇒ 轉成 RedrawResult.Failed,那是本路徑原本就會回的「做不到」值。
         var appearance = await _gate.RunAsync<ActorAppearance?>(
-            "ActorAppearanceService.Redraw", () => GetActorAppearance(character), null);
+            "ActorAppearanceService.Redraw", () =>
+            {
+                // 🔴 存活檢查:上面的 Revert 會走 RedrawAndWait(最長 3 秒、跨過無數幀),
+                //    角色可能已經離開物件表(換區、退出 GPose、角色被刪)。回到框架執行緒
+                //    防不了這件事 —— 那個位址指向的是已釋放的記憶體,而 GetActorAppearance
+                //    會解 DrawData、CharacterBase 與武器 CharacterBase,踩下去就是
+                //    AccessViolationException(在 .NET Core 是 corrupted-state exception,
+                //    try/catch 攔不到)。重查放在框架執行緒上做,與解參之間沒有跨幀的空窗。
+                if(actorRef.IsAlive == false)
+                {
+                    Brio.Log.Information("角色在重繪期間消失,略過外觀套用(讀取現有外觀階段)。");
+                    return null;
+                }
+
+                return GetActorAppearance(character);
+            }, null);
         if(appearance is null)
             return RedrawResult.Failed;
 
@@ -122,6 +144,10 @@ public class ActorAppearanceService : IDisposable
 
     public async Task<RedrawResult> SetCharacterAppearance(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceRedraw = false)
     {
+        // 🔴 只抄走位址,不解參(理由同 Redraw:呼叫端自己就在 await 鏈上)。
+        //    下面每一個 await 回來、每一次要解參之前,都由物件表重查一次它還在不在。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, character.Address);
+
         // 🔴 await 的續行在<執行緒池>上,不在遊戲主執行緒上:
         //    Dalamud 這個 pin 沒有安裝任何 SynchronizationContext(整個 Dalamud repo 對
         //    SynchronizationContext 零命中),而 UI 繪製、遊戲事件回呼、原生 detour 進來時
@@ -133,7 +159,18 @@ public class ActorAppearanceService : IDisposable
         //    🔑 所以整段交回框架執行緒,不是只有第一行檢查 —— 下游的 extension 也一起被覆蓋。
         var stage1 = await _gate.RunAsync<AppearanceStage1?>(
             "ActorAppearanceService.SetCharacterAppearance",
-            () => ApplyAppearanceStage1(character, appearance, options, forceRedraw), null);
+            () =>
+            {
+                // 🔴 存活檢查:呼叫端自己就可能在 await 之後(本檔 Redraw 的 revert 路徑、
+                //    ActorAppearanceCapability.SetAppearance / ResetAppearance)。
+                if(actorRef.IsAlive == false)
+                {
+                    Brio.Log.Information("角色在重繪期間消失,略過外觀套用(第一階段)。");
+                    return null;
+                }
+
+                return ApplyAppearanceStage1(character, appearance, options, forceRedraw);
+            }, null);
         if(stage1 is null)
             return RedrawResult.Failed;
 
@@ -149,11 +186,28 @@ public class ActorAppearanceService : IDisposable
 
         // 🔴 這裡是原本那個「兩個 await 之後的 unsafe 區塊」,同樣交回框架執行緒。
         //    卸載期什麼都不做:那一瞬間少套一次 ExtendedAppearance 可以接受,崩潰不行。
+        var stage2Applied = false;
         await _gate.RunAsync(
             "ActorAppearanceService.SetCharacterAppearance.extended",
-            () => ApplyAppearanceStage2(character, state.Appearance, options, state.ForceHeadToggles));
+            () =>
+            {
+                // 🔴 存活檢查:上面的 _redrawService.Redraw 會等完整重繪(DrawWhenReady 與
+                //    WaitForDrawing 各最多 100 幀),Glamourer 還原又是一次 IPC 往返 ——
+                //    角色在這段期間消失之後,character 的位址指向的是已釋放的記憶體,
+                //    回到框架執行緒防不了,ApplyAppearanceStage2 整段都是解參與寫入。
+                if(actorRef.IsAlive == false)
+                {
+                    Brio.Log.Information("角色在重繪期間消失,略過外觀套用(延伸外觀階段)。");
+                    return;
+                }
 
-        return redrawResult;
+                ApplyAppearanceStage2(character, state.Appearance, options, state.ForceHeadToggles);
+                stage2Applied = true;
+            });
+
+        // 延伸外觀那一段沒有真的套上去(角色消失,或 Dalamud 卸載期直接旁路)就回既有的
+        // 失敗值,不要回報成重繪成功 —— 與前兩段在同樣情況下回 RedrawResult.Failed 一致。
+        return stage2Applied ? redrawResult : RedrawResult.Failed;
     }
 
     /// <summary>
