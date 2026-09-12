@@ -278,13 +278,17 @@ public class PenumbraService : BrioIPC
     {
         if(IsAvailable == false) return null;
 
-        return await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期從別的執行緒進來時不執行 body,
+        //    因為 Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派(Dalamud/Game/Framework.cs:167-211),轉派完全失效。
+        return await _gate.RunAsync<Dictionary<string, HashSet<string>>?>("Penumbra.GetGameObjectResourcePaths(IGameObject)", () =>
         {
             Brio.Log.Debug("Calling On IPC: Penumbra.GetGameObjectResourcePaths");
             var idx = gameObject?.ObjectIndex;
             if(idx == null) return null;
             return _penumbraResourcePaths.Invoke(idx.Value)[0];
-        }).ConfigureAwait(false);
+        }, null).ConfigureAwait(false);
     }
 
     public string GetMetaManipulations()
@@ -299,7 +303,12 @@ public class PenumbraService : BrioIPC
     public async Task RemoveTemporaryCollectionAsync(Guid applicationId, Guid collId)
     {
         if(!IsAvailable) return;
-        await _framework.RunOnFrameworkThread(() =>
+
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期從別的執行緒進來時不執行 body,
+        //    因為 Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派(Dalamud/Game/Framework.cs:167-211),轉派完全失效。
+        await _gate.RunAsync("Penumbra.RemoveTemporaryCollection", () =>
         {
             Brio.Log.Debug("[{applicationId}] Removing temp collection for {collId}", applicationId, collId);
             var ret2 = _penumbraRemoveTemporaryCollection.Invoke(collId);
@@ -311,33 +320,47 @@ public class PenumbraService : BrioIPC
     {
         if(!IsAvailable) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期從別的執行緒進來時不執行 body,
+        //    因為 Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派(Dalamud/Game/Framework.cs:167-211),轉派完全失效。
+        //    回值本來就被丟掉,卸載期的 Guid.Empty 不會被任何人看到。
+        await _gate.RunAsync("Penumbra.AssignTemporaryCollection", () =>
         {
             var retAssign = _penumbraAssignTemporaryCollection.Invoke(collName, idx, forceAssignment: true);
             Brio.Log.Debug("Assigning Temp Collection {collName} to index {idx}, Success: {ret}", collName, idx, retAssign);
             return collName;
-        }).ConfigureAwait(false);
+        }, Guid.Empty).ConfigureAwait(false);
     }
 
     public async Task<Guid> CreateTemporaryCollectionAsync(string uid)
     {
         if(!IsAvailable) return Guid.Empty;
 
-        return await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期從別的執行緒進來時不執行 body,
+        //    因為 Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派(Dalamud/Game/Framework.cs:167-211),轉派完全失效。
+        //    卸載期回 Guid.Empty —— 那正是本方法自己在 !IsAvailable 時就會回的值。
+        return await _gate.RunAsync("Penumbra.CreateTemporaryCollection", () =>
         {
             var collName = "Brio_" + uid;
             _penumbraCreateNamedTemporaryCollection.Invoke("Brio", collName, out var collId);
             Brio.Log.Debug("Creating Temp Collection {collName}, GUID: {collId}", collName, collId);
             return collId;
 
-        }).ConfigureAwait(false);
+        }, Guid.Empty).ConfigureAwait(false);
     }
 
     public async Task SetTemporaryModsAsync(Guid applicationId, Guid collId, Dictionary<string, string> modPaths)
     {
         if(!IsAvailable) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期從別的執行緒進來時不執行 body,
+        //    因為 Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派(Dalamud/Game/Framework.cs:167-211),轉派完全失效。
+        await _gate.RunAsync("Penumbra.SetTemporaryMods", () =>
         {
             foreach(var mod in modPaths)
             {
@@ -354,7 +377,11 @@ public class PenumbraService : BrioIPC
     {
         if(!IsAvailable) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期從別的執行緒進來時不執行 body,
+        //    因為 Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派(Dalamud/Game/Framework.cs:167-211),轉派完全失效。
+        await _gate.RunAsync("Penumbra.SetManipulationData", () =>
         {
             Brio.Log.Debug("[{applicationId}] Manip: {data}", applicationId, manipulationData);
             var retAdd = _penumbraAddTemporaryMod.Invoke("BrioChara_Meta", collId, [], manipulationData, 0);

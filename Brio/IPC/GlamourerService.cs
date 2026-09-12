@@ -198,7 +198,12 @@ public class GlamourerService : BrioIPC
     {
         if((!IsAvailable) || _dalamudService.IsZoning) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 這支是 public 的非同步包裝(目前零呼叫端),接上之後一定是從別的執行緒進來。
+        //    RevertByName 會打 Glamourer 的 IPC 端點 —— 提供端的碼跑在呼叫端的執行緒上,
+        //    而它在那裡動的是遊戲角色的外觀狀態。閘門在已經是框架執行緒時就地執行、行為逐字不變;
+        //    卸載期不執行 body(Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread
+        //    會就地在呼叫端執行緒執行委派,Dalamud/Game/Framework.cs:167-211,轉派完全失效)。
+        await _gate.RunAsync("Glamourer.RevertByName", () =>
         {
             RevertByName(name, applicationId);
 

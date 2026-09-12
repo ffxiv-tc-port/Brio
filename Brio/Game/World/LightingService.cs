@@ -12,6 +12,7 @@ using Brio.Entities;
 using Brio.Entities.World;
 using Brio.Game.Camera;
 using Brio.Game.GPose;
+using Brio.IPC;
 using Dalamud.Bindings.ImGuizmo;
 using Dalamud.Game;
 using Dalamud.Hooking;
@@ -41,6 +42,13 @@ public unsafe class LightingService : IDisposable
     //
 
     private readonly IFramework _framework;
+
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 在
+    /// <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// （<c>Dalamud/Game/Framework.cs:167-211</c>），等於轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly IServiceProvider _serviceProvider;
     private readonly GPoseService _gPoseService;
     private readonly EntityManager _entityManager;
@@ -87,6 +95,7 @@ public unsafe class LightingService : IDisposable
         _entityManager = entityManager;
         _virtualCameraManager = virtualCameraManager;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
 
         var spawnGameLightAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? 48 89 84 ?? ?? ?? ?? ?? 48 85 C0 0F ?? ?? ?? ?? ?? 48 8B C8", "光源:配置 SpawnGameLight");
         _spawnGameLight = (delegate* unmanaged<GameLight*, void>)spawnGameLightAddress;
@@ -412,7 +421,12 @@ public unsafe class LightingService : IDisposable
                 return;
             }
 
-            _framework.RunOnFrameworkThread(() =>
+            // 🔴 LoadLight 是 public 且目前零呼叫端,接上之後不保證在框架執行緒上。
+            //    body 會配置原生記憶體(SpawnGameLight)並寫 GameLight 的 Transform,
+            //    在非框架執行緒上做就是 AccessViolationException,而 AVE 在 .NET Core 是
+            //    corrupted-state exception,外面那個 try/catch 攔不到。
+            //    卸載期不執行 body:少載入一盞燈可以接受,卸載期配置原生記憶體不行。
+            _ = _gate.RunAsync("LightingService.LoadLight", () =>
             {
                 GameLight* gameLight = igameLight.GameLight;
 

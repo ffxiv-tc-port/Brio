@@ -117,7 +117,12 @@ public class CustomizePlusService : BrioIPC
     {
         if(IsAvailable == false || profileId == null) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 這支是 public 的非同步包裝(目前零呼叫端),接上之後一定是從別的執行緒進來。
+        //    Customize+ 的 CallGate 提供端跑在呼叫端的執行緒上,而它在那裡改的是角色體型。
+        //    閘門在已經是框架執行緒時就地執行、行為逐字不變;卸載期不執行 body
+        //    (Dalamud 在 IsFrameworkUnloading 為真時 RunOnFrameworkThread 會就地在呼叫端
+        //    執行緒執行委派,Dalamud/Game/Framework.cs:167-211,轉派完全失效)。
+        await _gate.RunAsync("CustomizePlus.RevertById", () =>
         {
             _ = _customizePlusDeleteByUniqueId.InvokeFunc(profileId.Value);
         }).ConfigureAwait(false);
