@@ -109,11 +109,9 @@ public class BrioIPCService : IDisposable
 
     /// <summary>
     /// 🔴 所有同步端點的遊戲主執行緒閘門。CallGate 是直接方法呼叫，提供端跑在<b>呼叫端的執行緒</b>上，
-    /// 而下面每一個 Impl 都會生成／銷毀角色、解原生指標、改 model transform、對遊戲碼寫 NOP、
-    /// 或走訪 <c>EntityManager</c> 的裸字典 —— 那些在非 framework 執行緒上做就是
+    /// 而下面每一個 Impl 都會生成／銷毀角色、解原生指標、改 model transform、對遊戲碼寫 NOP、或走訪 <c>EntityManager</c> 的裸字典 —— 那些在非 framework 執行緒上做就是
     /// AccessViolationException，而 AVE 在 .NET Core 連 <c>try</c>／<c>catch</c> 都攔不到。
-    /// 📌 已經在 framework 執行緒上呼叫時，閘門就地執行、行為逐字不變。
-    /// </summary>
+    /// 📌 已經在 framework 執行緒上呼叫時，閘門就地執行、行為逐字不變。</summary>
     private readonly IpcFrameworkGate _ipcGate;
 
     public BrioIPCService(ActorSpawnService actorSpawnService, GPoseService gPoseService, ConfigurationService configurationService, EntityManager entityManager,

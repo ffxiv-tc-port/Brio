@@ -141,26 +141,11 @@ public class DalamudService : IDisposable
              .FirstOrDefault(i => (!onlyGposeCharacters || i.ObjectIndex >= 200) && string.Equals(i.Name.ToString(), name, StringComparison.Ordinal));
     }
 
-    /// <summary>
-    /// 把 <paramref name="func"/> 丟回遊戲主執行緒執行。本檔所有 <c>*Async</c> 包裝都走這裡。
-    /// </summary>
-    /// <param name="unavailable">
-    /// 卸載期（見下）要回的「做不到」值。一律沿用該包裝自己原本在「沒有玩家」時就會回的值，
-    /// 這樣呼叫端看到的值域一個都沒有變寬。
-    /// </param>
+    /// <summary>把 <paramref name="func"/> 丟回遊戲主執行緒執行。本檔所有 <c>*Async</c> 包裝都走這裡。</summary>
+    /// <param name="unavailable">卸載期（見下）要回的「做不到」值。一律沿用該包裝自己原本在「沒有玩家」時就會回的值，這樣呼叫端看到的值域一個都沒有變寬。</param>
     /// <remarks>
-    /// 🔴 <b>卸載期閘門</b>：Dalamud 的 <c>IFramework.RunOnFrameworkThread</c> 在
-    /// <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端的執行緒</b>執行委派
-    /// （<c>Dalamud/Game/Framework.cs</c> 的 <c>IsInFrameworkUpdateThread || IsFrameworkUnloading</c>），
-    /// 等於這個轉接點在那一瞬間完全失效。而本檔包裝的內容全是原生層存取 ——
-    /// 讀 <c>IClientState.LocalPlayer</c>（本 pin 的 <c>ObjectTable</c> 包裝是每格預配、
-    /// 存取時就地改寫 <c>Address</c> 的共用實例）、<c>IGameObject.IsValid()</c>、走訪物件表。
-    /// 這些在非 framework 執行緒上做就是 AccessViolationException，
-    /// 而 AVE 在 .NET Core 是 corrupted-state exception，<c>try</c>／<c>catch</c> 攔不到。
-    /// 🔑 所以卸載期一律<b>不執行</b> <paramref name="func"/>，直接回
-    /// <paramref name="unavailable"/>：那一瞬間功能失效可以接受（遊戲要關了），崩潰不行。
-    /// 📌 已經在 framework 執行緒上時完全不受影響（那本來就是安全的執行緒），行為逐字不變。
-    /// </remarks>
+    /// 🔴 <b>卸載期閘門</b>：Dalamud 的 <c>IFramework.RunOnFrameworkThread</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端的執行緒</b>執行委派，等於這個轉接點在那一瞬間完全失效。
+    /// 🔑 所以卸載期一律<b>不執行</b> <paramref name="func"/>，直接回 <paramref name="unavailable"/>：那一瞬間功能失效可以接受（遊戲要關了），崩潰不行。</remarks>
     public async Task<T> RunOnFrameworkThread<T>(Func<T> func, T unavailable = default!, [CallerMemberName] string callerMember = "", [CallerFilePath] string callerFilePath = "", [CallerLineNumber] int callerLineNumber = 0)
     {
         if(!_framework.IsInFrameworkUpdateThread)

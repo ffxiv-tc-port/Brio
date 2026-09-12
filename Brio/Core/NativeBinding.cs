@@ -6,16 +6,11 @@ using System.Collections.Generic;
 
 namespace Brio.Core;
 
-/// <summary>
-/// 台服(TC)移植用的原生繫結閘門。
-///
+/// <summary>台服(TC)移植用的原生繫結閘門。
 /// 上游 Brio 直接呼叫 <c>ISigScanner.ScanText</c>,特徵碼對不上時它會擲例外;
 /// Brio 的服務全部是 DI 單例,任何一個建構子擲例外 = 整個外掛載入失敗。
-/// 台服的執行檔與國際服不同版,特徵碼失效是常態而不是意外,
 /// 所以這裡把「找不到特徵碼」從「外掛掛掉」降級成「該功能停用」。
-///
-/// 診斷一律寫 Information 級(使用者跑 LogLevel 1,盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒)。
-/// </summary>
+/// 診斷一律寫 Information 級(使用者跑 LogLevel 1,盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒)。</summary>
 public static class NativeBinding
 {
     private static readonly List<string> _failures = [];
@@ -70,8 +65,7 @@ public static class NativeBinding
 
     /// <summary>
     /// 給「離線稽核時在本客戶端有多個命中、而且無法分辨哪一個才對」的特徵碼用。
-    /// 行為與 <see cref="Scan"/> 相同(Dalamud 取第一個命中),但會在載入時明白記一筆,
-    /// 這樣「這個功能沒作用」就能立刻對應到「當初就知道它有歧義」,而不是重新查一遍。
+    /// 行為與 <see cref="Scan"/> 相同(Dalamud 取第一個命中),但會在載入時明白記一筆。
     /// </summary>
     /// <param name="offlineHitCount">離線對台服執行檔掃描到的命中數。</param>
     public static nint ScanAmbiguous(ISigScanner scanner, string signature, string purpose, int offlineHitCount)

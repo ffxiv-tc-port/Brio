@@ -179,10 +179,8 @@ public class PenumbraService : BrioIPC
 
     /// <summary>
     /// 把指定角色指派到某個 Penumbra 集合,並回傳「還原時該指回去的集合」。
-    /// <para>
     /// 回傳 <c>null</c> 代表「沒有可還原的目標」(Penumbra 不在、指派被拒、或問不到目前生效的集合),
     /// 呼叫端不可以把它當成有效集合拿去還原。
-    /// </para>
     /// </summary>
     public Guid? SetCollectionForObject(IGameObject gameObject, Guid collectionName)
     {
@@ -206,12 +204,10 @@ public class PenumbraService : BrioIPC
             return oldCollection.Value.Id;
 
         // 這裡刻意與上游 cycleapple 的寫法有兩點不同:
-        //   (1) 失敗一律回 null,不回 Guid.Empty。本方法回傳型別是 Guid?,呼叫端
-        //       (ActorAppearanceCapability.SetCollection) 只檢查 is not null;回 Guid.Empty 會讓它
-        //       把全 0 的假集合記成待還原目標,ResetCollection 反而會把角色指到不存在的集合。
-        //   (2) 不拿 objectValid 當提前 return 的閘門。它只說物件表那一格當下有沒有東西,
-        //       真正的權威是 SetCollectionForObject 自己的回傳碼(上面已經檢查過)。
-        //       objectValid 為 false 時 effectiveCollection 不可信,所以只在這裡當成「沒有舊集合」。
+        // (1) 失敗一律回 null,不回 Guid.Empty。回 Guid.Empty 會讓它把全 0 的假集合記成待還原目標,ResetCollection 反而會把角色指到不存在的集合。
+        // (2) 不拿 objectValid 當提前 return 的閘門。
+        // 真正的權威是 SetCollectionForObject 自己的回傳碼(上面已經檢查過)。
+        // objectValid 為 false 時 effectiveCollection 不可信,所以只在這裡當成「沒有舊集合」。
         return objectValid ? effectiveCollection.Id : null;
     }
 
@@ -225,16 +221,8 @@ public class PenumbraService : BrioIPC
 
     /// <summary>
     /// 讓 Penumbra 把這一格當成獨立角色,而不是「某個角色的過場複製體」。
-    /// <para>
-    /// Brio 生成角色時用 <c>CharacterSetup.CopyFromCharacter</c> 從來源角色整份複製,
-    /// Penumbra 因此會把這一格的集合與 Glamourer 查詢導向來源角色的識別碼 ——
-    /// 使用者對 Brio 角色設定的集合就落不到它自己身上。
-    /// </para>
     /// </summary>
-    /// <param name="objectIndex">
-    /// 刻意收索引而不是 <c>IGameObject</c>:本 pin 的物件表包裝是每格重用、存取時就地改寫 Address,
-    /// 跨幀持有會靜默換人。索引請在呼叫端當場抄走。
-    /// </param>
+    /// <param name="objectIndex">刻意收索引而不是 <c>IGameObject</c>:本 pin 的物件表包裝是每格重用、存取時就地改寫 Address,跨幀持有會靜默換人。</param>
     public void DetachCutsceneActor(ushort objectIndex)
     {
         if(IsAvailable == false)
