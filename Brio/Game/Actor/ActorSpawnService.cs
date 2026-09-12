@@ -320,19 +320,11 @@ public class ActorSpawnService : IDisposable
         publicSetCompanion(character, container.Kind, (short)container.Id);
 
         // We need to wait for the companion to be ready before we can draw it.
-        //
-        // 🔴🔴 原本這裡把 &character.Native()->CompanionObject->Character.GameObject 這個**裸原生指標**
-        //     捕獲進最多 1000 幀(60fps 下約 16 秒)的逐幀重排回呼,每一幀拿它解參,滿足時還往裡面寫
-        //     EnableDraw()。宿主或同伴在這 16 秒內被銷毀是使用者按一下就會發生的事,而
-        //     AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到
-        //     ⇒ 直接把遊戲弄崩。character 本身的 Address 也是建構當下凍結的,
-        //     CalculateCompanionInfo 每一幀都在解參它,同樣會踩到懸空位址。
-        //
-        //     同伴物件是宿主的子結構(CompanionObject),沒有自己能抄走的穩定身分,所以正解是
-        //     「每一幀從宿主重新導航」:抄走宿主的物件表索引 + 位址(都是值型別),每一幀先由物件表
-        //     確認宿主還在(GetObjectAddress 只讀物件表的指標陣列、不解參任何存下來的位址),
-        //     再從活著的宿主重新讀 CompanionObject。宿主不在了就一直回報未滿足,最後由
-        //     RunUntilSatisfied 自己逾時(留下一行 Warning),全程不解參懸空位址。
+        // 同伴物件是宿主的子結構(CompanionObject),沒有自己能抄走的穩定身分,所以正解是
+        // 「每一幀從宿主重新導航」:抄走宿主的物件表索引 + 位址(都是值型別),每一幀先由物件表
+        // 確認宿主還在(GetObjectAddress 只讀物件表的指標陣列、不解參任何存下來的位址),
+        // 再從活著的宿主重新讀 CompanionObject。宿主不在了就一直回報未滿足,最後由
+        // RunUntilSatisfied 自己逾時(留下一行 Warning),全程不解參懸空位址。
         var hostRef = new LiveActorRef(_objectTable, character);
 
         _framework.RunUntilSatisfied(
@@ -356,8 +348,6 @@ public class ActorSpawnService : IDisposable
     /// 每次呼叫都先由物件表重新確認宿主還活著,再從宿主導航到同伴物件。
     /// 宿主已消失、同伴槽是空的、或現在掛著的同伴不是這次要求的那一隻時回傳 <c>null</c>,
     /// 全程不解參任何先前存下來的位址。<b>回傳的指標只能在同一幀之內使用。</b>
-    /// 條件與原本的 <c>character.CalculateCompanionInfo(out info) &amp;&amp; info.Kind == container.Kind
-    /// &amp;&amp; info.Id == container.Id</c> 逐項等價(CalculateCompanionInfo 為真 ≡ Kind != None)。
     /// </summary>
     private unsafe NativeGameObject* ResolveCompanionGameObject(LiveActorRef hostRef, CompanionContainer container)
     {

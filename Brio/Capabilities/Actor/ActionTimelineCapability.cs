@@ -119,11 +119,8 @@ public class ActionTimelineCapability : ActorCharacterCapability
     public async void StopSpeedAndResetTimeline(Action? postStopAction = null, bool resetSpeedAfterAction = false)
     {
         // 🔴 這支是 async void:未處理的例外不會進任何 Task,而是變成行程層級的未處理例外。
-        //    而下面 await 的是<帶延遲>的 RunOnTick —— Dalamud 在卸載期對帶延遲的 RunOnTick
-        //    回的是 Task.FromCanceled(委派完全不執行,Dalamud/Game/Framework.cs:200-211),
-        //    await 它就擲 TaskCanceledException。
-        //    🔑 這裡只吞「取消」這一種流程控制,別的例外原樣往外拋 —— 不是拿 try/catch 當防護
-        //    (AccessViolationException 在 .NET Core 是 corrupted-state exception,本來就攔不到)。
+        // 而下面 await 的是<帶延遲>的 RunOnTick —— Dalamud 在卸載期對帶延遲的 RunOnTick 回的是 Task.FromCanceled,await 它就擲 TaskCanceledException。
+        // 🔑 這裡只吞「取消」這一種流程控制,別的例外原樣往外拋。
         try
         {
             await StopSpeedAndResetTimelineCore(postStopAction, resetSpeedAfterAction);
@@ -204,14 +201,8 @@ public class ActionTimelineCapability : ActorCharacterCapability
             }
         }, delayTicks: 4);
 
-        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上(Dalamud 這個 pin 沒有安裝
-        //    任何 SynchronizationContext,而 UI／事件回呼進來時 TaskScheduler.Current 是 Default)。
-        //    唯一真的會傳 postStopAction 的呼叫端是 PosingCapability.ImportPose,它包的是
-        //    ImportPose_Internal —— 那支會走 ModelPosing.ImportModelPose → ModelTransformService
-        //    的 GetTransform／SetTransform(IGameObject),全是解原生指標與寫入。
-        //    在執行緒池上做就是 AccessViolationException,而 AVE 在 .NET Core 是
-        //    corrupted-state exception,try/catch 攔不到。
-        //    📌 閘門是 await 的,所以與後面 resetSpeedAfterAction 那一段的先後順序不變。
+        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上。
+        // 📌 閘門是 await 的,所以與後面 resetSpeedAfterAction 那一段的先後順序不變。
         await _gate.RunAsync("ActionTimelineCapability.postStopAction", () =>
         {
             // 🔴 存活檢查:上面那個 delayTicks: 4 已經跨了 4 幀以上,角色可能已經離開物件表。

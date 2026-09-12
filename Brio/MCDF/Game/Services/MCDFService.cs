@@ -26,30 +26,10 @@ using System.Threading.Tasks;
 
 namespace Brio.MCDF.Game.Services;
 
-/// <summary>
-/// 匯出流程用的角色身分。<b>只保存值型別,不保存 IGameObject。</b>
-///
-/// <para>
-/// 匯出一份 MCDF 中間有 WaitForDrawing、最長 10 秒的存在性輪詢、以及數個 Penumbra / Glamourer / Customize+ 的
-/// IPC 往返,前後跨越數百幀。<c>IGameObject</c> 的 <c>Address</c> 是建構當下凍結的、永不重新解析,
-/// 角色在這段期間離開 GPose 或消失之後,任何解參考(<c>Name</c> / <c>ObjectIndex</c> / <c>ObjectKind</c> /
-/// <c>GameObjectId</c> —— 最後這個還是虛擬函式呼叫)都是懸空讀。
-/// AccessViolationException 在 .NET Core 是 corrupted-state exception,<c>try/catch</c> 攔不到。
-/// </para>
-///
-/// <para>
-/// 重新繫結時<b>兩個條件都要成立</b>,兩者互相補對方的盲點:
-/// <list type="number">
-/// <item><c>ObjectIndex</c> + <c>Address</c> 仍在物件表裡(<c>LiveActorRef</c>,只讀物件表自己的指標陣列,
-/// 不解參考任何存下來的位址)⇒ 記憶體安全;這一條擋不住的是槽位被回收後換人(ABA)。</item>
-/// <item>重查到的物件回報的 <c>GameObjectId</c> 與當初抄下來的相同 ⇒ 身分正確;
-/// 這一條擋不住的是同一個 id 出現在多個槽位(GPose 複本),那由第 1 條擋。</item>
-/// </list>
-/// 所以這裡刻意<b>不</b>用 <c>SearchById</c>:它只比 id、回傳第一個命中,而且對 id 為 0 的角色直接回 null。
-/// (套用流程 ApplyDataAsync 走的是 SearchById —— 那裡的語意是「這個角色回來了就繼續套」,
-/// 匯出的語意則是「來源中途沒了就中止」,不該改繫結到別的物件上。)
-/// </para>
-/// </summary>
+/// <summary>匯出流程用的角色身分。<b>只保存值型別,不保存 IGameObject。</b>重新繫結時<b>兩個條件都要成立</b>,兩者互相補對方的盲點:
+/// <c>ObjectIndex</c> + <c>Address</c> 仍在物件表裡(<c>LiveActorRef</c>,只讀物件表自己的指標陣列,不解參考任何存下來的位址)⇒ 記憶體安全;這一條擋不住的是槽位被回收後換人(ABA)。
+/// 重查到的物件回報的 <c>GameObjectId</c> 與當初抄下來的相同 ⇒ 身分正確;這一條擋不住的是同一個 id 出現在多個槽位(GPose 複本),那由第 1 條擋。
+/// 所以這裡刻意<b>不</b>用 <c>SearchById</c>:它只比 id、回傳第一個命中,而且對 id 為 0 的角色直接回 null。</summary>
 internal readonly record struct McdfExportActor(string Name, ulong GameObjectId, int ObjectIndex, nint Address);
 
 /// <summary>匯出途中角色從物件表消失。用專屬型別讓上層能與「真的出錯」分開處理。</summary>
@@ -311,10 +291,8 @@ public class MCDFService : IDisposable
 
     // 這條路徑從頭到尾有數秒的等待(3 秒 Delay 與兩次 redraw-and-wait),期間目標角色可能離開 GPose 或直接消失。
     // 所以這裡只帶「名字 + GameObjectId」,不帶 IGameObject:每個 await 回來都用 id 重查一次物件表。
-    //  - SearchById 回傳的是 IObjectTable 共用的包裝實例(存取時就地改寫 Address,槽位空掉時連改寫都不做),
-    //    不能跨幀留著;因此在同一個 framework 回呼裡就用 CreateObjectReference 轉成獨立實例,只給接下來那一步用。
-    //  - 查不到就代表角色已經不在物件表裡 ⇒ 中止套用,走 finally 的既有還原路徑,不留半套狀態。
-    // ⚠️ AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到,所以只能靠不解參舊位址。
+    // - SearchById 回傳的是 IObjectTable 共用的包裝實例(存取時就地改寫 Address,槽位空掉時連改寫都不做), 不能跨幀留著;因此在同一個 framework 回呼裡就用 CreateObjectReference 轉成獨立實例,只給接下來那一步用。
+    // - 查不到就代表角色已經不在物件表裡 ⇒ 中止套用,走 finally 的既有還原路徑,不留半套狀態。
     private async Task ApplyDataAsync(Guid applicationId, (string Name, ulong GameObjectId) tempHandler, bool isSelf, string UID,
         Dictionary<string, string> modPaths, string? manipData, string? glamourerData, string? customizeData, CancellationToken token)
     {
@@ -323,26 +301,8 @@ public class MCDFService : IDisposable
         bool actorLost = false;
 
         // 以 id 重查目標,並在同一個 framework 回呼裡把物件索引一併讀出來(索引是值,可以安全帶出回呼)。
-        // 回傳的 IGameObject 是 CreateObjectReference 產生的獨立實例:Address 是這一刻凍結的,
-        // 不會被物件表的共用包裝改寫成別人 —— 但也只保證「緊接著的這一步」有效,不要跨下一個 await 留著。
-        //
-        // 📌 為什麼這裡用 SearchById 是安全的(2026-09-03 對台服 7.20 執行檔離線驗證,image base 0x140000000):
-        //    GameObject::GetGameObjectId 在 0x1408530E0,64 位元結果的高 4 位元組是「種類標籤」:
-        //      EntityId(+0x78)!= 0xE0000000              -> Id = EntityId,標籤 0
-        //      否則 BaseId(+0x7C)== 0                     -> Id = ObjectIndex(+0x8C) | (2 << 32)
-        //      否則 200 <= ObjectIndex <= 448(0x141632670)-> Id = ObjectIndex | (2 << 32)
-        //      否則                                        -> Id = BaseId | (1 << 32)
-        //    而 GPose 槽位(索引 200 起,ClientObjectManager 的配置迴圈上限 0xF0 ⇒ 200..439)的物件是由
-        //    0x1416320EB / 0x1416321D9 / 0x141631F95 建的,三處都寫死 EntityId = 0xE0000000、BaseId = 0
-        //    ⇒ GPose 目標的 id 一律是「索引 | 2<<32」。
-        //    ⇒ (1) 它永遠不會是 0,所以 Dalamud 對 id 0 直接回 null 那條(ObjectTable.cs:107-108)碰不到;
-        //       (2) 標籤在高位,所以它只可能跟另一個標籤 2 的 id 相等,而那是由物件表槽位號決定的
-        //           ⇒ 全表唯一,SearchById「回索引最小的第一個命中」不可能挑到別的角色。
-        //    ⚠️ 唯一在 200+ 範圍建物件卻不寫 0xE0000000 的是 0x141AC5E42(EntityId = 來源的 BaseId),
-        //       但它緊接著把 ObjectKind 設成 3(EventNpc),而 ApplyMCDF 的入口只收 ObjectKind.Player。
-        //    ⚠️ 離線證不到的部分:上面驗的是「建立時寫什麼」,不是「之後沒有人改寫 +0x78」。
-        //       真的有人改寫的話後果是套到別的角色(明顯的外觀錯誤),不是崩潰 ——
-        //       SearchById 拿到的位址來自這一幀的物件表,CreateObjectReference 解參的是活的物件。
+        // 回傳的 IGameObject 是 CreateObjectReference 產生的獨立實例:Address 是這一刻凍結的, 不會被物件表的共用包裝改寫成別人 —— 但也只保證「緊接著的這一步」有效,不要跨下一個 await 留著。
+        // ⇒ GPose 目標的 id 一律是「索引 | 2<<32」。全表唯一,SearchById「回索引最小的第一個命中」不可能挑到別的角色。
         async Task<(IGameObject? Actor, int Index)> ResolveActorAsync(string stage)
         {
             var resolved = await _framework.RunOnFrameworkThread<(IGameObject? Actor, int Index)>(() =>

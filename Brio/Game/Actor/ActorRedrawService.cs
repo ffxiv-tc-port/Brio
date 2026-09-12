@@ -37,12 +37,9 @@ public class ActorRedrawService(IFramework framework, IObjectTable objectTable)
 
     public async Task<RedrawResult> Redraw(IGameObject go)
     {
-        // 🔴 呼叫端不一定是在「取得 go 的那一幀」呼叫進來的:
-        //    ActorAppearanceService.SetCharacterAppearance 在中途 await 之後才呼叫本函式。
-        //    IGameObject 的 Address 是建構當下凍結的,角色消失後就是懸空位址,
-        //    連 go.ObjectIndex(第一行 log)都是解參。先由物件表確認它還指向表裡的同一個物件;
-        //    確認之後、同一個呼叫堆疊之內的解參才是安全的
-        //    (GetObjectAddress 只讀物件表自己的指標陣列,不解參任何存下來的位址)。
+        // 🔴 呼叫端不一定是在「取得 go 的那一幀」呼叫進來的: ActorAppearanceService.SetCharacterAppearance 在中途 await 之後才呼叫本函式。
+        // IGameObject 的 Address 是建構當下凍結的,角色消失後就是懸空位址,連 go.ObjectIndex(第一行 log)都是解參。
+        // 確認之後、同一個呼叫堆疊之內的解參才是安全的 (GetObjectAddress 只讀物件表自己的指標陣列,不解參任何存下來的位址)。
         var actorRef = LiveActorRef.FromAddress(_objectTable, go.Address);
         if(actorRef.IsAlive == false)
         {
@@ -85,13 +82,9 @@ public class ActorRedrawService(IFramework framework, IObjectTable objectTable)
     public async Task RedrawAndWait(IGameObject go)
     {
         // 🔴 這個迴圈最多跨 3 秒、每一圈都跨過 await。go 的 Address 是建構當下凍結的,
-        //    角色若在這段期間消失,IsDrawing(go) 會解參懸空位址;go.IsValid() 只檢查有沒有登入
-        //    (本 pin 的 Dalamud/Game/ClientState/Objects/Types/GameObject.cs:170-177),擋不住這件事,
-        //    而 AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
-        //    改成只抄走位址,每一圈由物件表重新確認它還在表裡之後才解參。
-        //    (FromAddress 只讀包裝物件自己的 Address 欄位,建構這一步本身也不解參。)
-        //    ⚠️ 這一步要放在讀 go.ObjectIndex 之前 —— 呼叫端(CharacterHandlerService.Revert)本身就
-        //    可能是在數次 await 之後才把包裝交進來的。
+        // 角色若在這段期間消失,IsDrawing(go) 會解參懸空位址。
+        // 改成只抄走位址,每一圈由物件表重新確認它還在表裡之後才解參。
+        // ⚠️ 這一步要放在讀 go.ObjectIndex 之前 —— 呼叫端(CharacterHandlerService.Revert)本身就可能是在數次 await 之後才把包裝交進來的。
         var actorRef = LiveActorRef.FromAddress(_objectTable, go.Address);
         if(actorRef.IsAlive == false)
         {
@@ -147,23 +140,10 @@ public class ActorRedrawService(IFramework framework, IObjectTable objectTable)
         return (true, native->RenderFlags == 0x00);
     }
 
-    /// <summary>
-    /// 由物件表重新確認呼叫端傳進來的包裝還指向表裡的同一個物件,是才回傳原生指標,否則回 <c>null</c>。
-    ///
-    /// <para>
-    /// 🔴 下面三支是 public 的,呼叫端可能在拿到 <see cref="IGameObject"/> 好幾幀之後才傳進來
-    /// (<c>Redraw</c> / <c>RedrawAndWait</c> 自己就是這樣被呼叫的),而包裝的 <c>Address</c> 是建構當下
-    /// 凍結的、永不重新解析。原本這裡寫的 <c>go.IsValid()</c> 不是防護 —— 本 pin 的 Dalamud
-    /// <c>Game/ClientState/Objects/Types/GameObject.cs:170-177</c> 逐字是
-    /// <c>if (actor == null) return false; return playerState.IsLoaded == true;</c>,只檢查有沒有登入。
-    /// AccessViolationException 在 .NET Core 是 corrupted-state exception,<c>try/catch</c> 攔不到。
-    /// </para>
-    ///
-    /// <para>
-    /// <c>go.Address</c> 只讀包裝物件自己的欄位、<c>GetObjectAddress</c> 只讀物件表自己的指標陣列,
-    /// 兩者都不解參任何存下來的位址,所以這個查詢本身永遠安全。
+    /// <summary>由物件表重新確認呼叫端傳進來的包裝還指向表裡的同一個物件,是才回傳原生指標,否則回 <c>null</c>。
+    /// 🔴 下面三支是 public 的,呼叫端可能在拿到 <see cref="IGameObject"/> 好幾幀之後才傳進來。
+    /// 原本這裡寫的 <c>go.IsValid()</c> 不是防護 —— 只檢查有沒有登入。
     /// 拿到指標之後<b>只能在同一個呼叫堆疊之內用完</b>,不可以再帶過幀。
-    /// </para>
     /// </summary>
     private unsafe NativeGameObject* ResolveLive(IGameObject go)
         => LiveActorRef.FromAddress(_objectTable, go.Address).GameObject;

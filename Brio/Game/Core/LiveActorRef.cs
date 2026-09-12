@@ -6,29 +6,10 @@ using NativeGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace Brio.Game.Core;
 
-/// <summary>
-/// 跨幀安全的角色參照。
-///
-/// <para>
-/// 🔴 Dalamud 的 <see cref="IGameObject"/> 包裝在建構當下就把 <c>Address</c> 凍結,之後永不重新解析。
-/// 角色消失後那個位址就懸空,任何解參(含 <c>Native()</c>、<c>Name</c>、<c>ObjectIndex</c>)都會踩到已釋放的記憶體;
-/// <c>IsValid()</c> 只檢查「有沒有登入」(本 pin 的 Dalamud/Game/ClientState/Objects/Types/GameObject.cs:170-177
-/// 逐字是 <c>if (actor == null) return false; return playerState.IsLoaded == true;</c>),對懸空位址零作用。
-/// AccessViolationException 在 .NET Core 是 corrupted-state exception,<c>try/catch</c> 攔不到,結果是整個遊戲崩潰。
-/// </para>
-///
-/// <para>
-/// 本結構只保存兩個值型別(物件表索引 + 建構當下的位址),每次取用時重新問物件表要位址。
-/// <see cref="IObjectTable.GetObjectAddress(int)"/> 只讀物件表自己的指標陣列(IndexSorted)並做邊界檢查,
-/// 完全不解參任何先前存下來的位址 ⇒ 這個查詢本身永遠安全。
-/// 位址對得起來才回傳,所以拿到的一定是「還在物件表裡的同一個物件」;
-/// 角色已消失(或槽位被別人接手)時拿到的是 <see cref="nint.Zero"/> 而不是懸空位址。
-/// </para>
-///
-/// <para>
-/// ⚠️ 建構子會讀 <c>gameObject.ObjectIndex</c>(這是一次解參),所以 <b>只能在物件確定還活著的當下建構</b>
-/// —— 也就是事件/呼叫發生的那一幀,不可以延後建構。與 <c>Brio.Entities.Actor.ActorEntity.IsGameObjectAlive</c> 同一套做法。
-/// </para>
+/// <summary>跨幀安全的角色參照。🔴 Dalamud 的 <see cref="IGameObject"/> 包裝在建構當下就把 <c>Address</c> 凍結,之後永不重新解析。
+/// 本結構只保存兩個值型別(物件表索引 + 建構當下的位址),每次取用時重新問物件表要位址。角色已消失(或槽位被別人接手)時拿到的是 <see cref="nint.Zero"/> 而不是懸空位址。
+/// <see cref="IObjectTable.GetObjectAddress(int)"/> 只讀物件表自己的指標陣列(IndexSorted)並做邊界檢查, 完全不解參任何先前存下來的位址 ⇒ 這個查詢本身永遠安全。
+/// ⚠️ 建構子會讀 <c>gameObject.ObjectIndex</c>(這是一次解參),所以 <b>只能在物件確定還活著的當下建構</b>。
 /// </summary>
 public readonly struct LiveActorRef
 {

@@ -32,9 +32,7 @@ namespace Brio.Entities.Actor
 
         /// <summary>
         /// GameObject 是 <c>IObjectTable.CreateObjectReference</c> 產生的獨立包裝(見 EntityActorManager),
-        /// 不會被物件表槽位共用實例就地改寫;但它的 Address 是建構當下凍結的:角色消失而
-        /// ObjectMonitorService 還沒把本實體拆下時,任何解參(Name / ObjectKind / ObjectIndex)都是懸空讀,
-        /// 而 AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+        /// 不會被物件表槽位共用實例就地改寫;但它的 Address 是建構當下凍結的。
         /// 這個檢查只讀物件表本身的指標陣列(GetObjectAddress),完全不解參已存的位址,所以永遠安全。
         /// </summary>
         public bool IsGameObjectAlive

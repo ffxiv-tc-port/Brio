@@ -270,13 +270,8 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     public async Task SetAppearance(ActorAppearance appearance, AppearanceImportOptions options)
     {
-        // 🔴 這支有好幾個呼叫端是延後 1~12 幀之後才跑的 RunOnTick 回呼
-        //    (SceneService.LoadProp / SceneService.ApplyDataToActor)。
-        //    第一行 log 的 GameObject.ObjectIndex、GetActorAppearance(Character)、
-        //    SetCharacterAppearance(Character, ...) 全部都要解參,而 GameObject.Address 是建構當下
-        //    凍結的 ⇒ 角色在那幾幀之內消失就是懸空位址,AccessViolationException 在 .NET Core 是
-        //    corrupted-state exception,try/catch 攔不到。IsGameObjectAlive 只讀物件表自己的指標陣列
-        //    (GetObjectAddress),不解參任何存下來的位址。
+        // 🔴 這支有好幾個呼叫端是延後 1~12 幀之後才跑的 RunOnTick 回呼 (SceneService.LoadProp / SceneService.ApplyDataToActor)。
+        // IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
         if(Actor.IsGameObjectAlive == false)
         {
             Brio.Log.Info("套用外觀略過:目標角色已經不在物件表裡。");
@@ -293,12 +288,8 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         _originalAppearance ??= _actorAppearanceService.GetActorAppearance(Character);
         _ = await _actorAppearanceService.SetCharacterAppearance(Character, appearance, options);
 
-        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上(Dalamud 這個 pin 沒有安裝
-        //    任何 SynchronizationContext,而 UI／事件回呼進來時 TaskScheduler.Current 是 Default)。
-        //    ApplyShaderOverride 走 Character.GetShaderParams() → GetHuman() → 解 ICharacter 的
-        //    原生指標並寫入 ShaderParams,在執行緒池上做就是 AccessViolationException,
-        //    而 AVE 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
-        //    📌 else 那一支(_modelShaderOverride.Reset())是純受管理的欄位清零,不需要轉派。
+        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上。
+        // 📌 else 那一支(_modelShaderOverride.Reset())是純受管理的欄位清零,不需要轉派。
         if(options.HasFlag(AppearanceImportOptions.Shaders))
         {
             await _gate.RunAsync("ActorAppearanceCapability.SetAppearance.shaders", ApplyShaderOverride);
@@ -452,13 +443,9 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     public unsafe void AttachWeapon()
     {
-        // 🔴 這支有四個呼叫端都是延後 5~10 幀的 RunOnTick 回呼(本檔 SetAppearance / Redraw、
-        //    ActorSpawnService.SpawnNewProp、SceneService.LoadProp)。Character(= ActorEntity.GameObject)
-        //    的 Address 是建構當下凍結的,角色在那幾幀之內消失就成了懸空位址,Character.Native() 之後
-        //    的解參與 PlayTimeline 寫入都會踩到已釋放的記憶體 —— AccessViolationException 在 .NET Core
-        //    是 corrupted-state exception,try/catch 攔不到。IsGameObjectAlive 只讀物件表自己的指標
-        //    陣列(GetObjectAddress),不解參任何存下來的位址,是安全的存活檢查。
-        //    擋在這裡一次,四個延後呼叫端就一起安全了。
+        // 🔴 這支有四個呼叫端都是延後 5~10 幀的 RunOnTick 回呼(本檔 SetAppearance / Redraw、ActorSpawnService.SpawnNewProp、SceneService.LoadProp)。
+        // IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址,是安全的存活檢查。
+        // 擋在這裡一次,四個延後呼叫端就一起安全了。
         if(Actor.IsGameObjectAlive == false)
             return;
 
@@ -480,13 +467,8 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     private unsafe void ApplyShaderOverride()
     {
-        // 🔴 兩個呼叫端都在 await 之後(本檔 SetAppearance 與 Redraw),而中間那次
-        //    SetCharacterAppearance／Redraw 會等完整重繪(最多 200 幀)。角色在那段期間
-        //    消失(換區、退出 GPose、角色被刪)之後,Character 的位址指向的是已釋放的記憶體 ——
-        //    GetShaderParams() 會解 ICharacter 的原生指標再寫入 ShaderParams,踩下去就是
-        //    AccessViolationException(在 .NET Core 是 corrupted-state exception,try/catch
-        //    攔不到)。回到框架執行緒防不了這件事,一定要先由物件表確認它還在。
-        //    IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參存下來的位址。
+        // 🔴 兩個呼叫端都在 await 之後(本檔 SetAppearance 與 Redraw),而中間那次 SetCharacterAppearance／Redraw 會等完整重繪(最多 200 幀)。
+        // 回到框架執行緒防不了這件事,一定要先由物件表確認它還在。
         if(Actor.IsGameObjectAlive == false)
         {
             Brio.Log.Information("角色在重繪期間消失,略過外觀套用(著色器覆寫)。");

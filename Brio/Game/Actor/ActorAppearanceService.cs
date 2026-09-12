@@ -36,11 +36,10 @@ public class ActorAppearanceService : IDisposable
     private readonly CharacterHandlerService _characterHandlerService;
     private readonly DalamudService _dalamudService;
 
-    /// <summary>
-    /// 主執行緒閘門。🔴 這支服務的原生存取有一半跑在 <c>await</c> 之後 —— 那時在執行緒池上,
+    /// <summary>主執行緒閘門。🔴 這支服務的原生存取有一半跑在 <c>await</c> 之後 —— 那時在執行緒池上,
     /// 不在框架執行緒上(理由見 <see cref="Redraw"/> 的註解)。閘門在已經是框架執行緒時就地執行,
     /// 行為逐字不變;<c>IsFrameworkUnloading</c> 為真且從別的執行緒進來時回「做不到」值,
-    /// 因為 Dalamud 在卸載期會就地執行委派(<c>Dalamud/Game/Framework.cs:167-211</c>),轉派完全失效。
+    /// 因為 Dalamud 在卸載期會就地執行委派,轉派完全失效。
     /// </summary>
     private readonly IpcFrameworkGate _gate;
 
@@ -110,24 +109,16 @@ public class ActorAppearanceService : IDisposable
         if(revert)
             await _characterHandlerService.Revert(character);
 
-        // 🔴 上面那個 await 的續行在<執行緒池>上,不在遊戲主執行緒上:
-        //    Dalamud 這個 pin 沒有安裝任何 SynchronizationContext(整個 Dalamud repo 對
-        //    SynchronizationContext 零命中),而 UI 繪製、遊戲事件回呼、原生 detour 進來時
-        //    TaskScheduler.Current 就是 TaskScheduler.Default ⇒ await 之後不會自己回到框架執行緒。
-        //    GetActorAppearance 會解 ICharacter 的原生指標(ActorAppearance.FromCharacter 讀
-        //    DrawData、CharacterBase、武器 CharacterBase),在執行緒池上做就是 AccessViolationException,
-        //    而 AVE 在 .NET Core 是 corrupted-state exception,try/catch 與 HookSafety 都攔不到。
-        //    閘門在已經是框架執行緒時就地執行,行為逐字不變、不多花任何一幀。
-        //    卸載期回 null ⇒ 轉成 RedrawResult.Failed,那是本路徑原本就會回的「做不到」值。
+        // 🔴 上面那個 await 的續行在<執行緒池>上,不在遊戲主執行緒上。
+        // Dalamud 這個 pin 沒有安裝任何 SynchronizationContext,await 之後不會自己回到框架執行緒。
+        // 閘門在已經是框架執行緒時就地執行,行為逐字不變、不多花任何一幀。
+        // 卸載期回 null ⇒ 轉成 RedrawResult.Failed,那是本路徑原本就會回的「做不到」值。
         var appearance = await _gate.RunAsync<ActorAppearance?>(
             "ActorAppearanceService.Redraw", () =>
             {
-                // 🔴 存活檢查:上面的 Revert 會走 RedrawAndWait(最長 3 秒、跨過無數幀),
-                //    角色可能已經離開物件表(換區、退出 GPose、角色被刪)。回到框架執行緒
-                //    防不了這件事 —— 那個位址指向的是已釋放的記憶體,而 GetActorAppearance
-                //    會解 DrawData、CharacterBase 與武器 CharacterBase,踩下去就是
-                //    AccessViolationException(在 .NET Core 是 corrupted-state exception,
-                //    try/catch 攔不到)。重查放在框架執行緒上做,與解參之間沒有跨幀的空窗。
+                // 🔴 存活檢查:上面的 Revert 會走 RedrawAndWait(最長 3 秒、跨過無數幀),角色可能已經離開物件表(換區、退出 GPose、角色被刪)。
+                // 回到框架執行緒防不了這件事。
+                // 重查放在框架執行緒上做,與解參之間沒有跨幀的空窗。
                 if(actorRef.IsAlive == false)
                 {
                     Brio.Log.Information("角色在重繪期間消失,略過外觀套用(讀取現有外觀階段)。");
@@ -148,15 +139,8 @@ public class ActorAppearanceService : IDisposable
         //    下面每一個 await 回來、每一次要解參之前,都由物件表重查一次它還在不在。
         var actorRef = LiveActorRef.FromAddress(_objectTable, character.Address);
 
-        // 🔴 await 的續行在<執行緒池>上,不在遊戲主執行緒上:
-        //    Dalamud 這個 pin 沒有安裝任何 SynchronizationContext(整個 Dalamud repo 對
-        //    SynchronizationContext 零命中),而 UI 繪製、遊戲事件回呼、原生 detour 進來時
-        //    TaskScheduler.Current 就是 TaskScheduler.Default ⇒ await 之後不會自己回到框架執行緒。
-        //    這支的兩段原生存取原本都直接跑在呼叫端的執行緒上:第一段的呼叫端至少有一個是在
-        //    await 之後才叫進來的(本檔 Redraw 的 revert 路徑),第二段更是自己在兩個 await 之後。
-        //    兩段都要解 character 的原生指標、寫 DrawData、呼叫遊戲函式(UpdateDrawData／LoadWeapon／
-        //    SetGlasses／HideHeadgear／SetVisor／HideVieraEars),在非框架執行緒上做就是 AVE。
-        //    🔑 所以整段交回框架執行緒,不是只有第一行檢查 —— 下游的 extension 也一起被覆蓋。
+        // 🔴 await 的續行在<執行緒池>上,不在遊戲主執行緒上。
+        // 🔑 所以整段交回框架執行緒,不是只有第一行檢查 —— 下游的 extension 也一起被覆蓋。
         var stage1 = await _gate.RunAsync<AppearanceStage1?>(
             "ActorAppearanceService.SetCharacterAppearance",
             () =>
@@ -212,10 +196,8 @@ public class ActorAppearanceService : IDisposable
 
     /// <summary>
     /// <see cref="SetCharacterAppearance"/> 前半段在框架執行緒上算出來的狀態。
-    /// <para>
     /// <c>Appearance</c> 是被 <see cref="AppearanceSanitizer"/> 與臉飾／髮飾邏輯改過的那一份 ——
     /// 後半段必須用同一份,不可以用呼叫端原本傳進來的。
-    /// </para>
     /// </summary>
     private readonly struct AppearanceStage1
     {

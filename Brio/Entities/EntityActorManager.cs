@@ -49,12 +49,9 @@ public unsafe class EntityActorManager : IDisposable
     {
         foreach(var go in _objects)
         {
-            // 🔴 IObjectTable 的索引子/列舉回傳的是**每個槽預先配置、每次讀取就地改寫 Address**
-            //    的共用包裝物件(Dalamud ObjectTable.CachedEntry.Update)。
-            //    ActorEntity 會把這個物件長期持有,而 EntityId 又是在建構當下由 Address 字串化而來
-            //    ⇒ 之後只要有人讀同一個槽,已存的 ActorEntity.GameObject.Address 就會靜默指向別人,
-            //    但它的 EntityId 還停在舊位址(對不上 ⇒ 移除不掉,而姿勢寫入會寫到別的角色身上)。
-            //    CreateObjectReference 會配一個獨立實例,與 OnCharacterInitialized 走的是同一條路。
+            // 🔴 IObjectTable 的索引子/列舉回傳的是**每個槽預先配置、每次讀取就地改寫 Address** 的共用包裝物件(Dalamud ObjectTable.CachedEntry.Update)。
+            // 之後只要有人讀同一個槽,已存的 ActorEntity.GameObject.Address 就會靜默指向別人,但它的 EntityId 還停在舊位址(對不上 ⇒ 移除不掉,而姿勢寫入會寫到別的角色身上)。
+            // CreateObjectReference 會配一個獨立實例,與 OnCharacterInitialized 走的是同一條路。
             var owned = _objects.CreateObjectReference(go.Address);
             if(owned is null)
                 continue;
@@ -155,22 +152,11 @@ public unsafe class EntityActorManager : IDisposable
 
     private void OnCharacterInitialized(NativeCharacter* chara)
     {
-        // 🔴 絕不把原生指標帶過幀。RunOnTick 沒給延遲時最快也要等到「下一個 framework tick」,
-        //    那時 chara 可能已經是懸空位址,而 IObjectTable.CreateObjectReference 只擋
-        //    address == nint.Zero 與 playerState.IsLoaded 兩道門,接著就無條件做
-        //    var obj = (CSGameObject*)address; var objKind = (ObjectKind)obj->ObjectKind;
-        //    (本 pin 的 Dalamud ObjectTable.cs:145-156)
-        //    ⇒ 懸空位址一定會被解參考,而 AccessViolationException 在 .NET Core 是
-        //    corrupted-state exception,try/catch 與例外隔離完全攔不到。
-        //    正解 = 抄走「物件表索引」這個值型別,下一幀再由物件表重查位址
-        //    (與 ActorEntity.IsGameObjectAlive 用的是同一套做法)。
-        //
-        //    📌 這裡讀到的索引已經是最終值:台服 7.20 客戶端離線反組譯確認
-        //       GameObject::Initialize(0x1408586C0)先於 0x1408587F9 寫入 ObjectIndex
-        //       (mov word ptr [obj+0x8C], si),才於 0x140858878 尾呼叫 vf@0x220 的虛擬
-        //       Initialize(BattleChara::Initialize 0x141938CD0 → Character::Initialize
-        //       0x1408BC520,也就是本事件的來源);而 ObjectMonitorService 是先跑 Original
-        //       再發事件,所以事件發生時 ObjectIndex 必定已經寫好。
+        // 🔴 絕不把原生指標帶過幀。RunOnTick 沒給延遲時最快也要等到「下一個 framework tick」。
+        // ⇒ 懸空位址一定會被解參考,而 AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 與例外隔離完全攔不到。
+        // 正解 = 抄走「物件表索引」這個值型別,下一幀再由物件表重查位址 (與 ActorEntity.IsGameObjectAlive 用的是同一套做法)。
+        // 📌 這裡讀到的索引已經是最終值。
+        // 所以事件發生時 ObjectIndex 必定已經寫好。
         var initializedObjectIndex = chara->GameObject.ObjectIndex;
 
         // We wait for one frame on create to ensure that the actor is fully initialized
