@@ -74,26 +74,54 @@ public class CharacterHandlerService : IDisposable
 
     public async Task RevertMCDF(CharacterHolder mCDFCharacterHolder)
     {
-        // holder 只帶 id,要用的當下才重查物件表。SearchById 要求主執行緒,
-        // 已經在 framework 執行緒上時 RunOnFrameworkThread 會就地同步執行(不會排隊,不會卡住呼叫端)。
-        var gameObject = mCDFCharacterHolder.GameObjectId != 0
-            ? await _gate.RunAsync<IGameObject?>("CharacterHandlerService.RevertMCDF", () => _objectTable.SearchById(mCDFCharacterHolder.GameObjectId), null).ConfigureAwait(false)
-            : null;
+        // holder 只帶 id,要用的當下才重查物件表;SearchById 回的是物件表共用的包裝,不能帶出這個回呼
+        // ⇒ 當場用 CreateObjectReference 換成獨立實例(Address 這一刻凍結,不會被改寫成別人)。
+        // 🔴 UnlockAndRevertCharacter 讀 ObjectIndex 是解參,所以連它一起留在閘門內:
+        //    await 的續行跑在執行緒池上,在那裡解參等於讀可能已釋放的記憶體。
+        var actor = await _gate.RunAsync<IGameObject?>("CharacterHandlerService.RevertMCDF", () =>
+        {
+            var live = mCDFCharacterHolder.GameObjectId != 0
+                ? _objectTable.SearchById(mCDFCharacterHolder.GameObjectId)
+                : null;
 
-        if(gameObject is null)
+            if(live is null || live.Address == nint.Zero)
+                return null;
+
+            var resolved = _objectTable.CreateObjectReference(live.Address);
+            if(resolved is not null)
+                _glamourerService.UnlockAndRevertCharacter(resolved);
+
+            return resolved;
+        }, null).ConfigureAwait(false);
+
+        if(actor is null)
             Brio.Log.Info($"RevertMCDF: 物件表中找不到 GameObjectId 0x{mCDFCharacterHolder.GameObjectId:X}(角色「{mCDFCharacterHolder.Name}」已離開),改為只以名稱還原 Glamourer。");
 
-        if(gameObject is not null)
-            _glamourerService.UnlockAndRevertCharacter(gameObject);
-
+        // 刻意留在閘門外:這支只把名字字串交給 Glamourer,不解參任何遊戲物件,
+        // 而角色已消失(或閘門走卸載期旁路)時它是唯一還跑得動的還原路徑。
         if(mCDFCharacterHolder.Name.IsNullOrEmpty() is false)
             _glamourerService.UnlockAndRevertCharacterByName(mCDFCharacterHolder.Name);
 
-        if(gameObject is not null && gameObject.Address != nint.Zero)
+        if(actor is null || actor.Address == nint.Zero)
+            return;
+
+        // actor.Address 讀的是獨立包裝自己的欄位(不解參),抄成 LiveActorRef 可以安全跨執行緒;
+        // RemoveTemporaryProfile 讀的 ObjectIndex 才是解參 ⇒ 回框架執行緒重查存活後才呼叫。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, actor.Address);
+
+        await _gate.RunAsync("CharacterHandlerService.RevertMCDF/CustomizePlus", () =>
         {
-            _customizePlusService.RemoveTemporaryProfile(gameObject);
-            await _penumbraService.Redraw(gameObject, true).ConfigureAwait(false);
-        }
+            if(actorRef.IsAlive == false)
+            {
+                Brio.Log.Information($"角色「{mCDFCharacterHolder.Name}」已經不在物件表裡,略過 Customize+ 暫時設定的還原。");
+                return;
+            }
+
+            _customizePlusService.RemoveTemporaryProfile(actor);
+        }).ConfigureAwait(false);
+
+        // Penumbra.Redraw 自己會抄位址、自己上閘門並重查存活,所以留在外面 await。
+        await _penumbraService.Redraw(actor, true).ConfigureAwait(false);
     }
 
     public async Task Revert(IGameObject obj, bool afterGpose = false)
