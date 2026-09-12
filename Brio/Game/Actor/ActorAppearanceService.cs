@@ -36,6 +36,14 @@ public class ActorAppearanceService : IDisposable
     private readonly CharacterHandlerService _characterHandlerService;
     private readonly DalamudService _dalamudService;
 
+    /// <summary>
+    /// 主執行緒閘門。🔴 這支服務的原生存取有一半跑在 <c>await</c> 之後 —— 那時在執行緒池上,
+    /// 不在框架執行緒上(理由見 <see cref="Redraw"/> 的註解)。閘門在已經是框架執行緒時就地執行,
+    /// 行為逐字不變;<c>IsFrameworkUnloading</c> 為真且從別的執行緒進來時回「做不到」值,
+    /// 因為 Dalamud 在卸載期會就地執行委派(<c>Dalamud/Game/Framework.cs:167-211</c>),轉派完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
+
     private delegate byte EnforceKindRestrictionsDelegate(nint a1, nint a2);
     private readonly Hook<EnforceKindRestrictionsDelegate>? _enforceKindRestrictionsHook;
 
@@ -51,8 +59,9 @@ public class ActorAppearanceService : IDisposable
     public unsafe ActorAppearanceService(GPoseService gPoseService, VirtualCameraManager virtualCameraManager, CharacterHandlerService characterHandlerService,
         IObjectTable objectTable, CustomizePlusService customizePlusService, PenumbraService penumbraService, ActorRedrawService actorRedrawService, DalamudService dalamudService,
         ConfigurationService configurationService, ActorRedrawService redrawService, GlamourerService glamourerService, EntityManager entityManager,
-        ISigScanner sigScanner, IGameInteropProvider hooks)
+        ISigScanner sigScanner, IGameInteropProvider hooks, IFramework framework)
     {
+        _gate = new IpcFrameworkGate(framework);
         _gPoseService = gPoseService;
         _configurationService = configurationService;
         _redrawService = redrawService;
@@ -94,11 +103,87 @@ public class ActorAppearanceService : IDisposable
         if(revert)
             await _characterHandlerService.Revert(character);
 
-        var appearance = GetActorAppearance(character);
-        return await SetCharacterAppearance(character, appearance, AppearanceImportOptions.All, true);
+        // 🔴 上面那個 await 的續行在<執行緒池>上,不在遊戲主執行緒上:
+        //    Dalamud 這個 pin 沒有安裝任何 SynchronizationContext(整個 Dalamud repo 對
+        //    SynchronizationContext 零命中),而 UI 繪製、遊戲事件回呼、原生 detour 進來時
+        //    TaskScheduler.Current 就是 TaskScheduler.Default ⇒ await 之後不會自己回到框架執行緒。
+        //    GetActorAppearance 會解 ICharacter 的原生指標(ActorAppearance.FromCharacter 讀
+        //    DrawData、CharacterBase、武器 CharacterBase),在執行緒池上做就是 AccessViolationException,
+        //    而 AVE 在 .NET Core 是 corrupted-state exception,try/catch 與 HookSafety 都攔不到。
+        //    閘門在已經是框架執行緒時就地執行,行為逐字不變、不多花任何一幀。
+        //    卸載期回 null ⇒ 轉成 RedrawResult.Failed,那是本路徑原本就會回的「做不到」值。
+        var appearance = await _gate.RunAsync<ActorAppearance?>(
+            "ActorAppearanceService.Redraw", () => GetActorAppearance(character), null);
+        if(appearance is null)
+            return RedrawResult.Failed;
+
+        return await SetCharacterAppearance(character, appearance.Value, AppearanceImportOptions.All, true);
     }
 
     public async Task<RedrawResult> SetCharacterAppearance(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceRedraw = false)
+    {
+        // 🔴 await 的續行在<執行緒池>上,不在遊戲主執行緒上:
+        //    Dalamud 這個 pin 沒有安裝任何 SynchronizationContext(整個 Dalamud repo 對
+        //    SynchronizationContext 零命中),而 UI 繪製、遊戲事件回呼、原生 detour 進來時
+        //    TaskScheduler.Current 就是 TaskScheduler.Default ⇒ await 之後不會自己回到框架執行緒。
+        //    這支的兩段原生存取原本都直接跑在呼叫端的執行緒上:第一段的呼叫端至少有一個是在
+        //    await 之後才叫進來的(本檔 Redraw 的 revert 路徑),第二段更是自己在兩個 await 之後。
+        //    兩段都要解 character 的原生指標、寫 DrawData、呼叫遊戲函式(UpdateDrawData／LoadWeapon／
+        //    SetGlasses／HideHeadgear／SetVisor／HideVieraEars),在非框架執行緒上做就是 AVE。
+        //    🔑 所以整段交回框架執行緒,不是只有第一行檢查 —— 下游的 extension 也一起被覆蓋。
+        var stage1 = await _gate.RunAsync<AppearanceStage1?>(
+            "ActorAppearanceService.SetCharacterAppearance",
+            () => ApplyAppearanceStage1(character, appearance, options, forceRedraw), null);
+        if(stage1 is null)
+            return RedrawResult.Failed;
+
+        var state = stage1.Value;
+
+        RedrawResult redrawResult = RedrawResult.Optmized;
+
+        if(state.NeedsRedraw)
+            redrawResult = await _redrawService.Redraw(character);
+
+        if(state.GlamourerReset)
+            await _glamourerService.RevertCharacter(character);
+
+        // 🔴 這裡是原本那個「兩個 await 之後的 unsafe 區塊」,同樣交回框架執行緒。
+        //    卸載期什麼都不做:那一瞬間少套一次 ExtendedAppearance 可以接受,崩潰不行。
+        await _gate.RunAsync(
+            "ActorAppearanceService.SetCharacterAppearance.extended",
+            () => ApplyAppearanceStage2(character, state.Appearance, options, state.ForceHeadToggles));
+
+        return redrawResult;
+    }
+
+    /// <summary>
+    /// <see cref="SetCharacterAppearance"/> 前半段在框架執行緒上算出來的狀態。
+    /// <para>
+    /// <c>Appearance</c> 是被 <see cref="AppearanceSanitizer"/> 與臉飾／髮飾邏輯改過的那一份 ——
+    /// 後半段必須用同一份,不可以用呼叫端原本傳進來的。
+    /// </para>
+    /// </summary>
+    private readonly struct AppearanceStage1
+    {
+        public AppearanceStage1(ActorAppearance appearance, bool needsRedraw, bool forceHeadToggles, bool glamourerReset)
+        {
+            Appearance = appearance;
+            NeedsRedraw = needsRedraw;
+            ForceHeadToggles = forceHeadToggles;
+            GlamourerReset = glamourerReset;
+        }
+
+        public ActorAppearance Appearance { get; }
+        public bool NeedsRedraw { get; }
+        public bool ForceHeadToggles { get; }
+        public bool GlamourerReset { get; }
+    }
+
+    /// <summary>
+    /// 原本是 <see cref="SetCharacterAppearance"/> 裡第一個 <c>unsafe</c> 區塊與它前後的旗標計算。
+    /// <b>內容逐字未動</b>(連縮排都保留原本的 <c>unsafe</c> 區塊),抽成方法只是為了整段交回框架執行緒。
+    /// </summary>
+    private AppearanceStage1 ApplyAppearanceStage1(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceRedraw)
     {
         var existingAppearance = GetActorAppearance(character);
 
@@ -257,20 +342,22 @@ public class ActorAppearanceService : IDisposable
             needsRedraw = true;
         }
 
-        RedrawResult redrawResult = RedrawResult.Optmized;
+        return new AppearanceStage1(appearance, needsRedraw, forceHeadToggles, glamourerReset);
+    }
 
-        if(needsRedraw)
-            redrawResult = await _redrawService.Redraw(character);
-
-        if(glamourerReset)
-            await _glamourerService.RevertCharacter(character);
-
+    /// <summary>
+    /// 原本是 <see cref="SetCharacterAppearance"/> 裡第二個 <c>unsafe</c> 區塊(兩個 await 之後那一段)。
+    /// <b>內容逐字未動</b>,唯一的差別是 <c>existingAppearance</c> 從外層變數改成本地變數
+    /// (原本那個賦值之後就沒有任何人再讀它)。
+    /// </summary>
+    private void ApplyAppearanceStage2(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceHeadToggles)
+    {
         unsafe
         {
 
             var native = character.Native();
 
-            existingAppearance = GetActorAppearance(character);
+            var existingAppearance = GetActorAppearance(character);
 
             if(options.HasFlag(AppearanceImportOptions.ExtendedAppearance))
             {
@@ -334,8 +421,6 @@ public class ActorAppearanceService : IDisposable
 
             }
         }
-
-        return redrawResult;
     }
 
     public ActorAppearance GetActorAppearance(ICharacter character) => ActorAppearance.FromCharacter(character);

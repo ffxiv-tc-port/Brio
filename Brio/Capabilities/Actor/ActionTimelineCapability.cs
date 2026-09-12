@@ -4,6 +4,7 @@ using Brio.Entities.Actor;
 using Brio.Game.Actor.Extensions;
 using Brio.Game.Posing;
 using Brio.Game.Types;
+using Brio.IPC;
 using Brio.UI.Widgets.Actor;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
@@ -19,6 +20,12 @@ namespace Brio.Capabilities.Actor;
 public class ActionTimelineCapability : ActorCharacterCapability
 {
     private readonly IFramework _framework;
+
+    /// <summary>
+    /// 主執行緒閘門。🔴 <see cref="StopSpeedAndResetTimeline"/> 在 <c>await</c> 之後才 Invoke
+    /// 呼叫端交進來的 <c>postStopAction</c>,而 <c>await</c> 的續行在執行緒池上。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
 
     public unsafe float SpeedMultiplier => SpeedMultiplierOverride ?? Character.Native()->Timeline.OverallSpeed;
     public bool HasSpeedMultiplierOverride => SpeedMultiplierOverride.HasValue;
@@ -44,6 +51,7 @@ public class ActionTimelineCapability : ActorCharacterCapability
     public ActionTimelineCapability(IFramework framework, ActorEntity parent, EntityManager entityManager, PhysicsService physicsService, ConfigurationService configService) : base(parent)
     {
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
 
         Widget = new ActionTimelineWidget(this, entityManager, physicsService, configService);
     }
@@ -173,7 +181,15 @@ public class ActionTimelineCapability : ActorCharacterCapability
             }
         }, delayTicks: 4);
 
-        postStopAction?.Invoke();
+        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上(Dalamud 這個 pin 沒有安裝
+        //    任何 SynchronizationContext,而 UI／事件回呼進來時 TaskScheduler.Current 是 Default)。
+        //    唯一真的會傳 postStopAction 的呼叫端是 PosingCapability.ImportPose,它包的是
+        //    ImportPose_Internal —— 那支會走 ModelPosing.ImportModelPose → ModelTransformService
+        //    的 GetTransform／SetTransform(IGameObject),全是解原生指標與寫入。
+        //    在執行緒池上做就是 AccessViolationException,而 AVE 在 .NET Core 是
+        //    corrupted-state exception,try/catch 攔不到。
+        //    📌 閘門是 await 的,所以與後面 resetSpeedAfterAction 那一段的先後順序不變。
+        await _gate.RunAsync("ActionTimelineCapability.postStopAction", () => postStopAction?.Invoke());
 
         Brio.Log.Verbose($"postStopAction Invoke: {postStopAction is not null}");
 

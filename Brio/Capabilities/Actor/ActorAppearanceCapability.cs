@@ -35,6 +35,13 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     private readonly GPoseService _gposeService;
     private readonly IFramework _framework;
+
+    /// <summary>
+    /// 主執行緒閘門。🔴 本檔有兩處在 <c>await</c> 之後呼叫 <see cref="ApplyShaderOverride"/>,
+    /// 而 <c>await</c> 的續行在執行緒池上(Dalamud 這個 pin 沒有安裝 SynchronizationContext,
+    /// 而 UI／事件回呼進來時 <c>TaskScheduler.Current</c> 就是 Default)。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly MCDFService _mCDFService;
 
     public string CurrentCollection => _penumbraService.GetCollectionForObject(Character);
@@ -90,6 +97,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         _gposeService = gPoseService;
         _customizePlusService = customizePlusService;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _entityManager = entityManager;
         _mCDFService = mCDFService;
         _targetService = targetService;
@@ -285,9 +293,15 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         _originalAppearance ??= _actorAppearanceService.GetActorAppearance(Character);
         _ = await _actorAppearanceService.SetCharacterAppearance(Character, appearance, options);
 
+        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上(Dalamud 這個 pin 沒有安裝
+        //    任何 SynchronizationContext,而 UI／事件回呼進來時 TaskScheduler.Current 是 Default)。
+        //    ApplyShaderOverride 走 Character.GetShaderParams() → GetHuman() → 解 ICharacter 的
+        //    原生指標並寫入 ShaderParams,在執行緒池上做就是 AccessViolationException,
+        //    而 AVE 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+        //    📌 else 那一支(_modelShaderOverride.Reset())是純受管理的欄位清零,不需要轉派。
         if(options.HasFlag(AppearanceImportOptions.Shaders))
         {
-            ApplyShaderOverride();
+            await _gate.RunAsync("ActorAppearanceCapability.SetAppearance.shaders", ApplyShaderOverride);
         }
         else
         {
@@ -401,7 +415,8 @@ public class ActorAppearanceCapability : ActorCharacterCapability
     {
         await _actorAppearanceService.Redraw(Character, HasMCDF);
 
-        ApplyShaderOverride();
+        // 🔴 同 SetAppearance:await 之後的續行在執行緒池上,而 ApplyShaderOverride 會解原生指標。
+        await _gate.RunAsync("ActorAppearanceCapability.Redraw.shaders", ApplyShaderOverride);
 
         if(Entity is ActorEntity actor && actor.IsProp == true)
             await _framework.RunOnTick(() =>
