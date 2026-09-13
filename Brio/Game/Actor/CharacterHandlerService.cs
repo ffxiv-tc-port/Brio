@@ -6,6 +6,7 @@ using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Brio.Game.Actor;
@@ -56,6 +57,8 @@ public class CharacterHandlerService : IDisposable
         _gPoseService.OnGPoseStateChange += OnGPoseStateChange;
     }
 
+    // 🔴 這個回呼跑在 GPose 進出的 hook detour 上(遊戲主執行緒):既不可阻塞,也不可讓例外逸出
+    //    —— 例外會中斷事件叫用串,其餘訂閱者的 GPose 收尾全部不跑,而且會傳進遊戲的原生碼。
     private void OnGPoseStateChange(bool newState)
     {
         if(newState == false)
@@ -65,11 +68,22 @@ public class CharacterHandlerService : IDisposable
                 var character = _dalamudService.GetGposeCharacterFromObjectTableByName(entry.Name, onlyGposeCharacters: true);
                 if(character is null)
                 {
-                    RevertMCDF(entry).GetAwaiter().GetResult();
+                    StartRevertMCDF(entry);
                 }
             }
             CharacterHandler.Clear();
         }
+    }
+
+    // 在主執行緒上 RevertMCDF 的每個 await 都落在已完成的工作上,所以這裡照樣同步跑完;
+    // 阻塞等待則會在鏈中任何一段改成真的會讓出時(例如改走 RedrawAndWait 那條路)鎖死主執行緒。
+    private void StartRevertMCDF(CharacterHolder entry)
+    {
+        _ = RevertMCDF(entry).ContinueWith(
+            task => Brio.Log.Error(task.Exception!, $"GPose 結束時還原角色「{entry.Name}」的 MCDF 外觀失敗。"),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     public async Task RevertMCDF(CharacterHolder mCDFCharacterHolder)
