@@ -4,6 +4,7 @@ using Brio.Entities;
 using Brio.Entities.Actor;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Actor.Interop;
+using Brio.Game.Core;
 using Brio.Library.Tags;
 using Brio.Resources;
 using Dalamud.Interface.Textures.TextureWraps;
@@ -24,7 +25,7 @@ public class AnamnesisCharaFileInfo(EntityManager entityManager, ConfigurationSe
         Brio.Log.Debug($"Name: {Name} | File: {file}");
         if(actor.TryGetCapability<ActorAppearanceCapability>(out ActorAppearanceCapability? capability) && capability != null)
         {
-            _ = capability.SetAppearance(file, AppearanceImportOptions.All);
+            capability.SetAppearance(file, AppearanceImportOptions.All).Observe("從資料庫套用 Anamnesis 外觀檔");
         }
     }
 }

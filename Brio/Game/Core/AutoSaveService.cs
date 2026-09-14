@@ -80,7 +80,7 @@ public class AutoSaveService : IDisposable
     private void OnElapsed(object? sender, ElapsedEventArgs e)
     {
         if(IsEnabled)
-            _gate.RunAsync("AutoSaveService.OnElapsed", AutoSave);
+            _gate.RunAsync("AutoSaveService.OnElapsed", AutoSave).Observe("自動存檔");
     }
 
     private void AutoSave()

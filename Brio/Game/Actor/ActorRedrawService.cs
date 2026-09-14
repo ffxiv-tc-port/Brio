@@ -99,7 +99,7 @@ public class ActorRedrawService(IFramework framework, IObjectTable objectTable)
         {
             DisableDraw(go);
 
-            _ = DrawWhenReady(go);
+            DrawWhenReady(go).Observe("重繪後等待角色就緒");
 
             var start = DateTime.Now;
             bool stillAlive = true;

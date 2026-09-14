@@ -168,7 +168,7 @@ public class CharacterHandlerService : IDisposable
 
         foreach(var character in CharacterHandler)
         {
-            _ = RevertHandledChara(character);
+            RevertHandledChara(character).Observe($"卸載時還原角色「{character.Name}」的 MCDF 外觀");
         }
 
         CharacterHandler.Clear();

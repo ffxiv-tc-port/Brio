@@ -140,14 +140,14 @@ public class ActorSpawnService : IDisposable
             }
 
             // Start drawing
-            _actorRedrawService.DrawWhenReady(outCharacter);
+            _actorRedrawService.DrawWhenReady(outCharacter).Observe("新生成角色等待就緒");
 
             if(disableSpawnCompanion == false && hasCompanion)
             {
                 // We need to wait for the companion to be ready before we can draw it.
                 var companion = _objectTable.CreateObjectReference((nint)(targetNative->CompanionObject));
                 if(companion != null)
-                    _actorRedrawService.DrawWhenReady(companion);
+                    _actorRedrawService.DrawWhenReady(companion).Observe("新生成同伴等待就緒");
             }
 
 
@@ -303,7 +303,7 @@ public class ActorSpawnService : IDisposable
 
         _actorLookAtService.RemoveObjectFromLook(go);
 
-        _ = _characterHandlerService.Revert(go, disposing);
+        _characterHandlerService.Revert(go, disposing).Observe("銷毀角色前還原外觀");
     }
 
     public void DestroyCompanion(ICharacter character)

@@ -409,7 +409,7 @@ public class TransientResourceService : IDisposable
         _recordedTransients.Clear();
         IsTransientRecording = true;
         RecordTimeRemaining.Value = TimeSpan.FromSeconds(150);
-        _ = Task.Run(async () =>
+        Task.Run(async () =>
         {
             try
             {
@@ -423,7 +423,7 @@ public class TransientResourceService : IDisposable
             {
                 IsTransientRecording = false;
             }
-        }, token);
+        }, token).Observe("暫時資源錄製計時");
     }
 
     public async Task WaitForRecording(CancellationToken token)

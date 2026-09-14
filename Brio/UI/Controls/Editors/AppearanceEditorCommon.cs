@@ -1,5 +1,6 @@
 ﻿using Brio.Capabilities.Actor;
 using Brio.Game.Actor.Appearance;
+using Brio.Game.Core;
 using Brio.UI.Controls.Selectors;
 using Brio.UI.Controls.Stateless;
 using Dalamud.Bindings.ImGui;
@@ -286,7 +287,7 @@ public static class AppearanceEditorCommon
 
         if(_globalNpcSelector.SelectionChanged && _globalNpcSelector.Selected != null)
         {
-            _ = capability.SetAppearance(_globalNpcSelector.Selected.Appearance, options);
+            capability.SetAppearance(_globalNpcSelector.Selected.Appearance, options).Observe("套用 NPC 外觀");
             return true;
         }
 

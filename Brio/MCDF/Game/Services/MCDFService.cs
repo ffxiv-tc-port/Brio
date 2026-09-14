@@ -146,7 +146,7 @@ public class MCDFService : IDisposable
         var canApply = _targetService.CanApplyMCDFToTarget();
 
         if(canApply.CanApply)
-            _ = ApplyMCDF(canApply.GameObject);
+            ApplyMCDF(canApply.GameObject).Observe("對 GPose 目標套用 MCDF");
     }
 
     // Load

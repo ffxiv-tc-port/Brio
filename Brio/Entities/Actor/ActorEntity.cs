@@ -4,6 +4,7 @@ using Brio.Config;
 using Brio.Entities.Core;
 using Brio.Game.Actor;
 using Brio.Game.Actor.Extensions;
+using Brio.Game.Core;
 using Brio.UI.Controls;
 using Brio.UI.Controls.Stateless;
 using Brio.UI.Theming;
@@ -137,7 +138,7 @@ namespace Brio.Entities.Actor
                 string toolTip = aac.IsHidden ? $"Show {aac.Actor.FriendlyName}" : $"Hide {aac.Actor.FriendlyName}";
                 if(ImBrio.FontIconButtonRight($"###{Id}_hideActor", aac.IsHidden ? FontAwesomeIcon.EyeSlash : FontAwesomeIcon.Eye, 1f, toolTip, bordered: false))
                 {
-                    aac.ToggleHide();
+                    aac.ToggleHide().Observe("切換隱藏角色");
                 }
             }
         }

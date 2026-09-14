@@ -1,6 +1,7 @@
 ﻿using Brio.Capabilities.Actor;
 using Brio.Capabilities.Posing;
 using Brio.Game.Actor.Appearance;
+using Brio.Game.Core;
 using Brio.Resources;
 using Brio.UI.Controls.Editors;
 using Brio.UI.Controls.Selectors;
@@ -77,7 +78,7 @@ public class ActorAppearanceWidget(ActorAppearanceCapability capability) : Widge
         didChange |= DrawPropSlot(ref currentAppearance, ref currentAppearance.Weapons.OffHand, ActorEquipSlot.Prop | ActorEquipSlot.OffHand);
 
         if(didChange)
-            _ = Capability.SetAppearance(currentAppearance, AppearanceImportOptions.All);
+            Capability.SetAppearance(currentAppearance, AppearanceImportOptions.All).Observe("套用外觀");
     }
 
     private bool DrawReset(ref ActorAppearance currentAppearance, ActorAppearance originalAppearance)
@@ -227,7 +228,7 @@ public class ActorAppearanceWidget(ActorAppearanceCapability capability) : Widge
         ImGui.SameLine();
 
         if(ImBrio.FontIconButtonRight("reset_appearance", FontAwesomeIcon.Undo, 1, "Reset", Capability.IsAppearanceOverridden))
-            _ = Capability.ResetAppearance();
+            Capability.ResetAppearance().Observe("重設外觀");
 
         using(var popup = ImRaii.Popup("widget_npc_selector"))
         {
@@ -243,14 +244,14 @@ public class ActorAppearanceWidget(ActorAppearanceCapability capability) : Widge
     {
         var toggele = Capability.IsHidden ? "Show" : "Hide";
         if(ImGui.MenuItem($"{toggele} {Capability.Actor.FriendlyName}###Appearance_popup_toggle"))
-            Capability.ToggleHide();
+            Capability.ToggleHide().Observe("切換隱藏角色");
     }
 
     public override void DrawQuickIcons()
     {
         if(ImBrio.FontIconButton("redrawwidget_redraw", FontAwesomeIcon.PaintBrush, "Redraw"))
         {
-            _ = Capability.Redraw();
+            Capability.Redraw().Observe("重繪角色");
         }
     }
 

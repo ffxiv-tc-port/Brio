@@ -11,6 +11,7 @@ using Brio.Core;
 using Brio.Entities;
 using Brio.Entities.World;
 using Brio.Game.Camera;
+using Brio.Game.Core;
 using Brio.Game.GPose;
 using Brio.IPC;
 using Dalamud.Bindings.ImGuizmo;
@@ -415,7 +416,7 @@ public unsafe class LightingService : IDisposable
             //    在非框架執行緒上做就是 AccessViolationException,而 AVE 在 .NET Core 是
             //    corrupted-state exception,外面那個 try/catch 攔不到。
             //    卸載期不執行 body:少載入一盞燈可以接受,卸載期配置原生記憶體不行。
-            _ = _gate.RunAsync("LightingService.LoadLight", () =>
+            _gate.RunAsync("LightingService.LoadLight", () =>
             {
                 GameLight* gameLight = igameLight.GameLight;
 
@@ -467,7 +468,7 @@ public unsafe class LightingService : IDisposable
 
                     light.SetEntityIndex(_lightEntities.Add(camEnt));
                 }
-            });
+            }).Observe("載入光源");
 
             Brio.Log.Info($"Light loaded from {igameLight.Index}");
         }

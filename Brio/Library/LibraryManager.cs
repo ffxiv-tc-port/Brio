@@ -1,5 +1,6 @@
 ﻿using Brio.Config;
 using Brio.Files;
+using Brio.Game.Core;
 using Brio.Library.Filters;
 using Brio.Library.Sources;
 using Brio.Library.Tags;
@@ -266,7 +267,7 @@ public class LibraryManager : IDisposable
 
     public void Scan()
     {
-        Task.Run(ScanAsync);
+        Task.Run(ScanAsync).Observe("資料庫掃描");
     }
 
     public async Task ScanAsync()

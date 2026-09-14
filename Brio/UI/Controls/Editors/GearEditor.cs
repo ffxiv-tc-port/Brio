@@ -1,5 +1,6 @@
 ﻿using Brio.Capabilities.Actor;
 using Brio.Game.Actor.Appearance;
+using Brio.Game.Core;
 using Brio.Game.Types;
 using Brio.Resources;
 using Brio.UI.Controls.Selectors;
@@ -41,25 +42,25 @@ public class GearEditor()
 
         if(ImBrio.FontIconButton("erase_equipment", FontAwesomeIcon.Eraser, "Remove all Equipment"))
         {
-            _capability.RemoveAllEquipment();
+            _capability.RemoveAllEquipment().Observe("卸下全部裝備");
         }
 
         ImGui.SameLine();
         if(ImBrio.FontIconButton("apply_smallclothes", FontAwesomeIcon.UserShield, "Equip NPC Smallclothes"))
         {
-            _capability.ApplySmallclothes();
+            _capability.ApplySmallclothes().Observe("套用內衣");
         }
 
         ImGui.SameLine();
         if(ImBrio.FontIconButton("apply_emperors", FontAwesomeIcon.UserNinja, "Equip Emperor's Set"))
         {
-            _capability.ApplyEmperors();
+            _capability.ApplyEmperors().Observe("套用皇帝的新裝");
         }
 
         ImGui.SameLine();
         if(ImBrio.FontIconButton("apply_invisibleclothes", FontAwesomeIcon.LowVision, "Equip Invisible Clothes"))
         {
-            _capability.ApplyInvisibleClothes();
+            _capability.ApplyInvisibleClothes().Observe("套用隱形裝備");
         }
 
         ImGui.Spacing();

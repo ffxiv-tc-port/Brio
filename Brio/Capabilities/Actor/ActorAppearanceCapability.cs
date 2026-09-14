@@ -172,7 +172,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         if(!IsCollectionOverridden && old is not null)
             _oldCollection = old.ToString();
 
-        _ = _actorAppearanceService.Redraw(Character, HasMCDF);
+        _actorAppearanceService.Redraw(Character, HasMCDF).Observe("套用 Penumbra 合集後重繪角色");
     }
     public void ResetCollection()
     {
@@ -180,7 +180,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         {
             _penumbraService.SetCollectionForObject(Character, Guid.Parse(_oldCollection!));
             _oldCollection = null;
-            _ = _actorAppearanceService.Redraw(Character, HasMCDF);
+            _actorAppearanceService.Redraw(Character, HasMCDF).Observe("還原 Penumbra 合集後重繪角色");
         }
     }
 
@@ -196,7 +196,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         {
             HasMCDF = false;
             IsDesignOverridden = false;
-            _glamourerService.RevertCharacter(Character);
+            _glamourerService.RevertCharacter(Character).Observe("還原 Glamourer 設計");
 
             if(checkResetLock && _glamourerService.CheckForLock(Character))
             {
@@ -265,8 +265,9 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         }
     }
 
-    public async void SetAppearanceAsTask(ActorAppearance appearance, AppearanceImportOptions options)
-        => await SetAppearance(appearance, options);
+    // 刻意不是 async void:那種寫法的未處理例外不會進任何 Task,而是直接變成行程層級的未處理例外。
+    public void SetAppearanceAsTask(ActorAppearance appearance, AppearanceImportOptions options)
+        => SetAppearance(appearance, options).Observe("SetAppearanceAsTask 套用外觀");
 
     public async Task SetAppearance(ActorAppearance appearance, AppearanceImportOptions options)
     {
@@ -318,7 +319,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         }
 
         if(doc != null)
-            _ = SetAppearance(doc, options);
+            SetAppearance(doc, options).Observe("匯入 Anamnesis 外觀檔");
     }
 
     public unsafe void ExportAppearance(string file)
@@ -422,7 +423,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
     {
         if(HasMCDF)
         {
-            _ = _characterHandlerService.Revert(GameObject);
+            _characterHandlerService.Revert(GameObject).Observe("重設外觀時還原 MCDF");
             HasMCDF = false;
         }
         else
@@ -489,13 +490,13 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
         ResetCollection();
         ResetProfile();
-        _ = ResetAppearance();
+        ResetAppearance().Observe("離開 GPose 時重設外觀");
     }
 
     private void OnPenumbraRedraw(int gameObjectId)
     {
         if(Character.ObjectIndex == gameObjectId && IsAppearanceOverridden)
-            _ = SetAppearance(CurrentAppearance, AppearanceImportOptions.All);
+            SetAppearance(CurrentAppearance, AppearanceImportOptions.All).Observe("Penumbra 重繪後重新套用外觀");
     }
 
     public override void Dispose()
@@ -505,6 +506,6 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
         ResetCollection();
         ResetProfile();
-        _ = ResetAppearance();
+        ResetAppearance().Observe("卸載能力時重設外觀");
     }
 }

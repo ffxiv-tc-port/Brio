@@ -94,7 +94,7 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
                     },
                     (__) =>
                     {
-                        _ = LoadProp(actorId, actorFile);
+                        LoadProp(actorId, actorFile).Observe("場景載入:套用道具資料");
                     },
                     100,
                     dontStartFor: 2
@@ -118,7 +118,7 @@ public class SceneService(EntityManager _entityManager, VirtualCameraManager _vi
                     },
                     (__) =>
                     {
-                        _ = ApplyDataToActor(actorId, actorFile);
+                        ApplyDataToActor(actorId, actorFile).Observe("場景載入:套用角色資料");
                     },
                     100,
                     dontStartFor: 2

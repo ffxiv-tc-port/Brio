@@ -1,5 +1,6 @@
 ﻿using Brio.Capabilities.Actor;
 using Brio.Game.Actor.Appearance;
+using Brio.Game.Core;
 using Brio.Resources;
 using Brio.Resources.Sheets;
 using Brio.UI.Controls.Stateless;
@@ -55,7 +56,7 @@ public class CustomizeEditor()
                 else
                 {
                     if(ImGui.Button("Make Human"))
-                        _ = _capability.MakeHuman();
+                        _capability.MakeHuman().Observe("套用預設人類外觀");
                 }
             }
         }

@@ -7,6 +7,7 @@ using Brio.Entities.Actor;
 using Brio.Entities.Core;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Camera;
+using Brio.Game.Core;
 using Brio.Game.GPose;
 using Brio.Game.Posing;
 using Brio.Input;
@@ -534,7 +535,7 @@ public class PosingGraphicalWindow : Window, IDisposable
         {
             ImGui.Text("Graphical posing is only available for humanoid characters.");
             if(ImGui.Button("Make Human"))
-                appearance.MakeHuman();
+                appearance.MakeHuman().Observe("套用預設人類外觀");
 
             return;
         }

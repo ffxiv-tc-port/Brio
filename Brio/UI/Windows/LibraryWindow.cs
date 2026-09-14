@@ -1,6 +1,7 @@
 ﻿using Brio.Config;
 using Brio.Entities;
 using Brio.Files;
+using Brio.Game.Core;
 using Brio.Game.GPose;
 using Brio.Game.Posing;
 using Brio.Game.Types;
@@ -17,6 +18,7 @@ using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
+using System.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -1146,7 +1148,10 @@ public class LibraryWindow : Window
         }
     }
 
-    public async void ReScan()
+    // 刻意不是 async void:那種寫法的未處理例外不會進任何 Task,而是直接變成行程層級的未處理例外。
+    public void ReScan() => ReScanAsync().Observe("資料庫重新掃描");
+
+    private async Task ReScanAsync()
     {
         _isRescanning = true;
 

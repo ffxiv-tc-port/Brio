@@ -1,4 +1,5 @@
-﻿using Dalamud.Bindings.ImGui;
+﻿using Brio.Game.Core;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 using System;
 using System.Collections.Generic;
@@ -215,6 +216,7 @@ public abstract class Selector<T> where T : class
         {
             PopulateList();
         }, TaskScheduler.Default);
+        _taskQueue.Observe("選單清單初始化");
 
         UpdateList();
     }
@@ -241,6 +243,7 @@ public abstract class Selector<T> where T : class
             Interlocked.Exchange(ref _filteredAndSortedItems, newList);
 
         }, TaskScheduler.Default);
+        _taskQueue.Observe("選單清單過濾與排序");
 
     }
 
