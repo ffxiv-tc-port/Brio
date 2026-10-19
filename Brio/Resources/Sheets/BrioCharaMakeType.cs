@@ -13,7 +13,9 @@ using System.Linq;
 
 namespace Brio.Resources.Sheets;
 
-[Sheet("CharaMakeType", 0x80D7DB6D)]
+// 台服此表的**欄位位移與上游完全相同**(型別亦相符),只有欄位**順序**不同,所以欄位雜湊對不上。
+// 雜湊在此無保護作用(Dalamud 關閉驗證),留著只會誤導,故不寫。
+[Sheet("CharaMakeType")]
 public unsafe struct BrioCharaMakeType(ExcelPage page, uint offset, uint row) : IExcelRow<BrioCharaMakeType>
 {
     public const int MenuCount = 28;

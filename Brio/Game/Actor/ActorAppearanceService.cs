@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Brio.Entities;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Actor.Extensions;
@@ -35,24 +36,31 @@ public class ActorAppearanceService : IDisposable
     private readonly CharacterHandlerService _characterHandlerService;
     private readonly DalamudService _dalamudService;
 
+    /// <summary>主執行緒閘門。🔴 這支服務的原生存取有一半跑在 <c>await</c> 之後 —— 那時在執行緒池上,
+    /// 不在框架執行緒上(理由見 <see cref="Redraw"/> 的註解)。閘門在已經是框架執行緒時就地執行,
+    /// 行為逐字不變;<c>IsFrameworkUnloading</c> 為真且從別的執行緒進來時回「做不到」值,
+    /// 因為 Dalamud 在卸載期會就地執行委派,轉派完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
+
     private delegate byte EnforceKindRestrictionsDelegate(nint a1, nint a2);
-    private readonly Hook<EnforceKindRestrictionsDelegate> _enforceKindRestrictionsHook = null!;
+    private readonly Hook<EnforceKindRestrictionsDelegate>? _enforceKindRestrictionsHook;
 
     private delegate nint UpdateWetnessDelegate(nint a1);
-    private readonly Hook<UpdateWetnessDelegate> _updateWetnessHook = null!;
+    private readonly Hook<UpdateWetnessDelegate>? _updateWetnessHook;
 
     private unsafe delegate nint UpdateTintDelegate(nint charaBase, nint tint);
-    private readonly Hook<UpdateTintDelegate> _updateTintHook = null!;
+    private readonly Hook<UpdateTintDelegate>? _updateTintHook;
 
-    private unsafe delegate* unmanaged<DrawDataContainer*, ushort, ushort, void> _setFacewear;
 
     public bool CanTint => _configurationService.Configuration.Appearance.EnableTinting;
 
     public unsafe ActorAppearanceService(GPoseService gPoseService, VirtualCameraManager virtualCameraManager, CharacterHandlerService characterHandlerService,
         IObjectTable objectTable, CustomizePlusService customizePlusService, PenumbraService penumbraService, ActorRedrawService actorRedrawService, DalamudService dalamudService,
         ConfigurationService configurationService, ActorRedrawService redrawService, GlamourerService glamourerService, EntityManager entityManager,
-        ISigScanner sigScanner, IGameInteropProvider hooks)
+        ISigScanner sigScanner, IGameInteropProvider hooks, IFramework framework)
     {
+        _gate = new IpcFrameworkGate(framework);
         _gPoseService = gPoseService;
         _configurationService = configurationService;
         _redrawService = redrawService;
@@ -66,34 +74,150 @@ public class ActorAppearanceService : IDisposable
         _dalamudService = dalamudService;
         _characterHandlerService = characterHandlerService;
 
-        var enforceKindRestrictionsAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 41 B0 ?? 48 8B D6 48 8B");
-        _enforceKindRestrictionsHook = hooks.HookFromAddress<EnforceKindRestrictionsDelegate>(enforceKindRestrictionsAddress, EnforceKindRestrictionsDetour);
-        _enforceKindRestrictionsHook.Enable();
+        _enforceKindRestrictionsHook = NativeBinding.ScanHook<EnforceKindRestrictionsDelegate>(sigScanner, hooks,
+            "E8 ?? ?? ?? ?? 41 B0 ?? 48 8B D6 48 8B", EnforceKindRestrictionsDetour, "外觀種族限制 EnforceKindRestrictions");
 
-        var updateWetnessAddress = sigScanner.ScanText("40 53 48 83 EC ?? 48 8B 01 48 8B D9 FF 90 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 03 48 8B CB 48 83 C4");
-        _updateWetnessHook = hooks.HookFromAddress<UpdateWetnessDelegate>(updateWetnessAddress, UpdateWetnessDetour);
-        _updateWetnessHook.Enable();
+        _updateWetnessHook = NativeBinding.ScanHook<UpdateWetnessDelegate>(sigScanner, hooks,
+            "40 53 48 83 EC ?? 48 8B 01 48 8B D9 FF 90 ?? ?? ?? ?? 48 85 C0 74 ?? 48 8B 03 48 8B CB 48 83 C4", UpdateWetnessDetour, "濕潤度 UpdateWetness");
 
-        var updateTintHookAddress = Marshal.ReadInt64((nint)(CharacterBase.StaticVirtualTablePointer) + 0xC0);
-        _updateTintHook = hooks.HookFromAddress<UpdateTintDelegate>((nint)updateTintHookAddress, UpdateTintDetour);
-        _updateTintHook.Enable();
+        // CharacterBase 虛擬表槽 0xC0/8 = 24。虛擬表指標解不出來時讀它是 AccessViolation,先判空。
+        nint updateTintHookAddress = nint.Zero;
+        var charaBaseVTable = (nint)CharacterBase.StaticVirtualTablePointer;
+        if(charaBaseVTable == nint.Zero)
+            NativeBinding.Fail("角色染色 UpdateTint", "CharacterBase 靜態虛擬表指標未解析");
+        else
+            updateTintHookAddress = (nint)Marshal.ReadInt64(charaBaseVTable + 0xC0);
+        _updateTintHook = NativeBinding.CreateHook<UpdateTintDelegate>(hooks, updateTintHookAddress, UpdateTintDetour, "角色染色 UpdateTint");
 
-        var setFacewearAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? FF C3 48 8D ?? ?? ?? ?? ?? ?? ?? 0F");
-        _setFacewear = (delegate* unmanaged<DrawDataContainer*, ushort, ushort, void>)setFacewearAddress;
+        // 刻意不掃上游自帶的 SetFacewear 特徵碼:它在台服有多個命中,其中一支的簽章根本不同,取錯就是把結構指標餵給不相干的函式。
+        // 改用 FFXIVClientStructs 的 DrawDataContainer.SetGlasses(它有自己的特徵碼)。
     }
 
     //
 
     public async Task<RedrawResult> Redraw(ICharacter character, bool revert)
     {
+        // 🔴 只抄走位址,不解參:呼叫端不一定是在「取得 character 的那一幀」進來的
+        //    (ActorAppearanceCapability.Redraw 自己就在 await 鏈上),而 IGameObject.Address
+        //    是建構當下凍結的、永不重新解析。FromAddress 只讀包裝物件自己的 Address 欄位,
+        //    每次查詢再由物件表比一次指標(GetObjectAddress 只讀物件表自己的指標陣列),
+        //    所以這個存活檢查本身永遠安全。做法與 ActorRedrawService.Redraw 相同。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, character.Address);
+
         if(revert)
             await _characterHandlerService.Revert(character);
 
-        var appearance = GetActorAppearance(character);
-        return await SetCharacterAppearance(character, appearance, AppearanceImportOptions.All, true);
+        // 🔴 上面那個 await 的續行在<執行緒池>上,不在遊戲主執行緒上。
+        // Dalamud 這個 pin 沒有安裝任何 SynchronizationContext,await 之後不會自己回到框架執行緒。
+        // 閘門在已經是框架執行緒時就地執行,行為逐字不變、不多花任何一幀。
+        // 卸載期回 null ⇒ 轉成 RedrawResult.Failed,那是本路徑原本就會回的「做不到」值。
+        var appearance = await _gate.RunAsync<ActorAppearance?>(
+            "ActorAppearanceService.Redraw", () =>
+            {
+                // 🔴 存活檢查:上面的 Revert 會走 RedrawAndWait(最長 3 秒、跨過無數幀),角色可能已經離開物件表(換區、退出 GPose、角色被刪)。
+                // 回到框架執行緒防不了這件事。
+                // 重查放在框架執行緒上做,與解參之間沒有跨幀的空窗。
+                if(actorRef.IsAlive == false)
+                {
+                    Brio.Log.Information("角色在重繪期間消失,略過外觀套用(讀取現有外觀階段)。");
+                    return null;
+                }
+
+                return GetActorAppearance(character);
+            }, null);
+        if(appearance is null)
+            return RedrawResult.Failed;
+
+        return await SetCharacterAppearance(character, appearance.Value, AppearanceImportOptions.All, true);
     }
 
     public async Task<RedrawResult> SetCharacterAppearance(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceRedraw = false)
+    {
+        // 🔴 只抄走位址,不解參(理由同 Redraw:呼叫端自己就在 await 鏈上)。
+        //    下面每一個 await 回來、每一次要解參之前,都由物件表重查一次它還在不在。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, character.Address);
+
+        // 🔴 await 的續行在<執行緒池>上,不在遊戲主執行緒上。
+        // 🔑 所以整段交回框架執行緒,不是只有第一行檢查 —— 下游的 extension 也一起被覆蓋。
+        var stage1 = await _gate.RunAsync<AppearanceStage1?>(
+            "ActorAppearanceService.SetCharacterAppearance",
+            () =>
+            {
+                // 🔴 存活檢查:呼叫端自己就可能在 await 之後(本檔 Redraw 的 revert 路徑、
+                //    ActorAppearanceCapability.SetAppearance / ResetAppearance)。
+                if(actorRef.IsAlive == false)
+                {
+                    Brio.Log.Information("角色在重繪期間消失,略過外觀套用(第一階段)。");
+                    return null;
+                }
+
+                return ApplyAppearanceStage1(character, appearance, options, forceRedraw);
+            }, null);
+        if(stage1 is null)
+            return RedrawResult.Failed;
+
+        var state = stage1.Value;
+
+        RedrawResult redrawResult = RedrawResult.Optmized;
+
+        if(state.NeedsRedraw)
+            redrawResult = await _redrawService.Redraw(character);
+
+        if(state.GlamourerReset)
+            await _glamourerService.RevertCharacter(character);
+
+        // 🔴 兩個 await 之後的這一段同樣交回框架執行緒。
+        //    卸載期什麼都不做:那一瞬間少套一次 ExtendedAppearance 可以接受,崩潰不行。
+        var stage2Applied = false;
+        await _gate.RunAsync(
+            "ActorAppearanceService.SetCharacterAppearance.extended",
+            () =>
+            {
+                // 🔴 存活檢查:上面的 _redrawService.Redraw 會等完整重繪(DrawWhenReady 與
+                //    WaitForDrawing 各最多 100 幀),Glamourer 還原又是一次 IPC 往返 ——
+                //    角色在這段期間消失之後,character 的位址指向的是已釋放的記憶體,
+                //    回到框架執行緒防不了,ApplyAppearanceStage2 整段都是解參與寫入。
+                if(actorRef.IsAlive == false)
+                {
+                    Brio.Log.Information("角色在重繪期間消失,略過外觀套用(延伸外觀階段)。");
+                    return;
+                }
+
+                ApplyAppearanceStage2(character, state.Appearance, options, state.ForceHeadToggles);
+                stage2Applied = true;
+            });
+
+        // 延伸外觀那一段沒有真的套上去(角色消失,或 Dalamud 卸載期直接旁路)就回既有的
+        // 失敗值,不要回報成重繪成功 —— 與前兩段在同樣情況下回 RedrawResult.Failed 一致。
+        return stage2Applied ? redrawResult : RedrawResult.Failed;
+    }
+
+    /// <summary>
+    /// <see cref="SetCharacterAppearance"/> 前半段在框架執行緒上算出來的狀態。
+    /// <c>Appearance</c> 是被 <see cref="AppearanceSanitizer"/> 與臉飾／髮飾邏輯改過的那一份 ——
+    /// 後半段必須用同一份,不可以用呼叫端原本傳進來的。
+    /// </summary>
+    private readonly struct AppearanceStage1
+    {
+        public AppearanceStage1(ActorAppearance appearance, bool needsRedraw, bool forceHeadToggles, bool glamourerReset)
+        {
+            Appearance = appearance;
+            NeedsRedraw = needsRedraw;
+            ForceHeadToggles = forceHeadToggles;
+            GlamourerReset = glamourerReset;
+        }
+
+        public ActorAppearance Appearance { get; }
+        public bool NeedsRedraw { get; }
+        public bool ForceHeadToggles { get; }
+        public bool GlamourerReset { get; }
+    }
+
+    /// <summary>
+    /// <see cref="SetCharacterAppearance"/> 的前半段(第一個 <c>unsafe</c> 區塊與它前後的旗標計算),
+    /// 抽成方法是為了整段交回框架執行緒。
+    /// </summary>
+    private AppearanceStage1 ApplyAppearanceStage1(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceRedraw)
     {
         var existingAppearance = GetActorAppearance(character);
 
@@ -211,7 +335,7 @@ public class ActorAppearanceService : IDisposable
                     }
                     else
                     {
-                        _setFacewear(&native->DrawData, 0, appearance.Facewear);
+                        native->DrawData.SetGlasses(0, appearance.Facewear);
                     }
                 }
             }
@@ -252,20 +376,20 @@ public class ActorAppearanceService : IDisposable
             needsRedraw = true;
         }
 
-        RedrawResult redrawResult = RedrawResult.Optmized;
+        return new AppearanceStage1(appearance, needsRedraw, forceHeadToggles, glamourerReset);
+    }
 
-        if(needsRedraw)
-            redrawResult = await _redrawService.Redraw(character);
-
-        if(glamourerReset)
-            await _glamourerService.RevertCharacter(character);
-
+    /// <summary>
+    /// <see cref="SetCharacterAppearance"/> 的後半段(兩個 await 之後那一段),抽成方法是為了整段交回框架執行緒。
+    /// </summary>
+    private void ApplyAppearanceStage2(ICharacter character, ActorAppearance appearance, AppearanceImportOptions options, bool forceHeadToggles)
+    {
         unsafe
         {
 
             var native = character.Native();
 
-            existingAppearance = GetActorAppearance(character);
+            var existingAppearance = GetActorAppearance(character);
 
             if(options.HasFlag(AppearanceImportOptions.ExtendedAppearance))
             {
@@ -329,8 +453,6 @@ public class ActorAppearanceService : IDisposable
 
             }
         }
-
-        return redrawResult;
     }
 
     public ActorAppearance GetActorAppearance(ICharacter character) => ActorAppearance.FromCharacter(character);
@@ -343,7 +465,7 @@ public class ActorAppearanceService : IDisposable
         if(_configurationService.Configuration.Appearance.ApplyNPCHack == ApplyNPCHack.InGPose && _gPoseService.IsGPosing)
             return 0;
 
-        return _enforceKindRestrictionsHook.Original(a1, a2);
+        return _enforceKindRestrictionsHook!.Original(a1, a2);
     }
 
     private nint UpdateWetnessDetour(nint a1)
@@ -351,7 +473,7 @@ public class ActorAppearanceService : IDisposable
         if(_gPoseService.IsGPosing)
             return 0;
 
-        return _updateWetnessHook.Original(a1);
+        return _updateWetnessHook!.Original(a1);
     }
 
     private nint UpdateTintDetour(nint charaBase, nint tint)
@@ -359,14 +481,14 @@ public class ActorAppearanceService : IDisposable
         if(_gPoseService.IsGPosing && CanTint)
             return 0;
 
-        return _updateTintHook.Original(charaBase, tint);
+        return _updateTintHook!.Original(charaBase, tint);
     }
 
     public void Dispose()
     {
-        _enforceKindRestrictionsHook.Dispose();
-        _updateWetnessHook.Dispose();
-        _updateTintHook.Dispose();
+        _enforceKindRestrictionsHook?.Dispose();
+        _updateWetnessHook?.Dispose();
+        _updateTintHook?.Dispose();
 
         GC.SuppressFinalize(this);
     }

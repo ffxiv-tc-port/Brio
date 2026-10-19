@@ -201,8 +201,9 @@ public static class PosingEditorCommon
             }
         }
 
-        if(ImGui.IsItemHovered())
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
+            using var tooltipAlpha = ImBrio.PushDisabledTooltipAlpha();
             if(posing?.Selected.Value is BonePoseInfoId poseInfo)
             {
                 switch(posing.SkeletonPosing.GetBonePose(poseInfo).MirrorMode)
@@ -251,7 +252,7 @@ public static class PosingEditorCommon
                 if(ImGui.Button("IK", buttonSize))
                     ImGui.OpenPopup("transform_ik_popup");
 
-                ImBrio.AttachToolTip("Inverse Kinematics");
+                ImBrio.AttachToolTip("Inverse Kinematics" + ImBrio.TooltipSeparator + IKService.TcWarning);
             }
         }
         else
@@ -259,7 +260,7 @@ public static class PosingEditorCommon
             ImGui.BeginDisabled();
             ImGui.Button("IK", buttonSize);
             ImGui.EndDisabled();
-            ImBrio.AttachToolTip("Inverse Kinematics");
+            ImBrio.AttachToolTip("Inverse Kinematics" + ImBrio.TooltipSeparator + IKService.TcWarning);
         }
     }
 }

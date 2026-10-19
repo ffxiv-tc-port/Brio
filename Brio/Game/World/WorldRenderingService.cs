@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Brio.Game.GPose;
 using Dalamud.Game;
 using Dalamud.Hooking;
@@ -15,9 +16,12 @@ public class WorldRenderingService : IDisposable
 
     public bool IsWaterFrozen
     {
-        get => _updateWaterRendererHook.IsEnabled;
+        get => _updateWaterRendererHook?.IsEnabled == true;
         set
         {
+            if(_updateWaterRendererHook is null)
+                return;
+
             if(value != IsWaterFrozen)
             {
                 if(value)
@@ -33,15 +37,16 @@ public class WorldRenderingService : IDisposable
     }
 
     private delegate nint UpdateWaterRendererDelegate(nint a1);
-    private readonly Hook<UpdateWaterRendererDelegate> _updateWaterRendererHook = null!;
+    private readonly Hook<UpdateWaterRendererDelegate>? _updateWaterRendererHook;
 
     public WorldRenderingService(ISigScanner scanner, IGameInteropProvider hooking, GPoseService gPoseService, ConfigurationService configurationService)
     {
         _gPoseService = gPoseService;
         _configurationService = configurationService;
 
-        var uwrAddress = scanner.ScanText("48 8B C4 48 89 58 ?? 57 48 81 EC ?? ?? ?? ?? 0F B6 B9");
-        _updateWaterRendererHook = hooking.HookFromAddress<UpdateWaterRendererDelegate>(uwrAddress, UpdateWaterRenderer);
+        _updateWaterRendererHook = NativeBinding.ScanHook<UpdateWaterRendererDelegate>(scanner, hooking,
+            "48 8B C4 48 89 58 ?? 57 48 81 EC ?? ?? ?? ?? 0F B6 B9",
+            UpdateWaterRenderer, "凍結水面 UpdateWaterRenderer", enable: false);
 
 
         _gPoseService.OnGPoseStateChange += OnGPoseStateChanged;

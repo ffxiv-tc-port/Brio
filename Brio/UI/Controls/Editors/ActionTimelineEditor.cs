@@ -82,10 +82,12 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
     private void DrawHeder()
     {
-        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 25), _physicsService.IsFreezeEnabled, hoverText: _physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics"))
+        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 25), _physicsService.IsFreezeEnabled))
         {
             _physicsService.FreezeToggle();
         }
+        ImBrio.AttachToolTip((_physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics")
+            + ImBrio.TooltipSeparator + PhysicsService.TcPatchWarning);
 
         ImGui.SameLine();
 
@@ -196,8 +198,7 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
         ImGui.SameLine();
         ImGui.Checkbox("###base_interrupt", ref _capability.DoBaseInterrupt);
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Interrupt");
+        ImBrio.SetItemTooltip("Interrupt");
 
         ImGui.SameLine();
         ImGui.SetCursorPosX(LabelStart);
@@ -231,8 +232,7 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
             if(popup.Success)
             {
                 ImGui.Checkbox("Start Animation On Select", ref _startAnimationOnSelect);
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Start Animation On Select");
+                ImBrio.SetItemTooltip("Start Animation On Select");
 
                 _globalTimelineSelector.Draw();
 
@@ -313,7 +313,11 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
         string preview = "None";
         if(lipsOverride != 0)
-            preview = GameDataProvider.Instance.ActionTimelines[lipsOverride].Key.ToString();
+            // IReadOnlyDictionary 的裸索引器:台服若沒有這個 row 會擲 KeyNotFoundException,
+            // 而這裡在 ImGui 繪製迴圈內 ⇒ 會炸掉整個 Brio UI。
+            preview = GameDataProvider.Instance.ActionTimelines.TryGetValue(lipsOverride, out var lipsTimeline)
+                ? lipsTimeline.Key.ToString()
+                : $"#{lipsOverride}";
 
         ImGui.SetNextItemWidth(MaxItemWidth);
         using(var combo = ImRaii.Combo("###lips", preview))
@@ -327,7 +331,8 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
 
                 for(uint i = 0x272; i <= 0x272 + 8; ++i)
                 {
-                    var entry = GameDataProvider.Instance.ActionTimelines[i];
+                    if(GameDataProvider.Instance.ActionTimelines.TryGetValue(i, out var entry) == false)
+                    continue;
                     bool selected = lipsOverride == i;
                     if(ImGui.Selectable($"{entry.Key} ({i})", selected))
                     {
@@ -601,8 +606,7 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
             ImGui.Checkbox("Hide Brio On Play  (Press 'Shift + B' to Stop Cutscene)", ref _cutsceneManager.CloseWindowsOnPlay);
 
             ImGui.Checkbox("###delay_Start", ref _cutsceneManager.DelayStart);
-            if(ImGui.IsItemHovered())
-                ImGui.SetTooltip("Start Delay");
+            ImBrio.SetItemTooltip("Start Delay");
 
             ImGui.SameLine();
             ImGui.SetNextItemWidth(MaxItemWidth);
@@ -623,8 +627,7 @@ public class ActionTimelineEditor(CutsceneManager cutsceneManager, GPoseService 
             using(ImRaii.Disabled(_cutsceneManager.StartAllActorAnimationsOnPlay == false))
             {
                 ImGui.Checkbox("###animation_delay_Start", ref _cutsceneManager.DelayAnimationStart);
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Animation Start Delay");
+                ImBrio.SetItemTooltip("Animation Start Delay");
 
                 ImGui.SameLine();
                 ImGui.SetNextItemWidth(MaxItemWidth);

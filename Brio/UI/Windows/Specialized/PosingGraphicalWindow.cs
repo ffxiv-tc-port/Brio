@@ -7,6 +7,7 @@ using Brio.Entities.Actor;
 using Brio.Entities.Core;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Camera;
+using Brio.Game.Core;
 using Brio.Game.GPose;
 using Brio.Game.Posing;
 using Brio.Input;
@@ -183,10 +184,12 @@ public class PosingGraphicalWindow : Window, IDisposable
     {
         const float buttonWidth = 28;
 
-        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 0), _physicsService.IsFreezeEnabled, hoverText: _physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics"))
+        if(ImBrio.ToggelButton("Freeze Physics", new Vector2(95, 0), _physicsService.IsFreezeEnabled))
         {
             _physicsService.FreezeToggle();
         }
+        ImBrio.AttachToolTip((_physicsService.IsFreezeEnabled ? "Un-Freeze Physics" : "Freeze Physics")
+            + ImBrio.TooltipSeparator + PhysicsService.TcPatchWarning);
 
         ImGui.SameLine();
 
@@ -253,8 +256,7 @@ public class PosingGraphicalWindow : Window, IDisposable
                 posing.Undo();
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Undo");
+        ImBrio.SetItemTooltip("Undo");
 
         ImGui.SameLine();
 
@@ -264,8 +266,7 @@ public class PosingGraphicalWindow : Window, IDisposable
                 posing.Redo();
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Redo");
+        ImBrio.SetItemTooltip("Redo");
 
         ImGui.SameLine();
 
@@ -276,8 +277,7 @@ public class PosingGraphicalWindow : Window, IDisposable
                 posing.Reset(false, false);
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Reset Pose");
+        ImBrio.SetItemTooltip("Reset Pose");
 
         ImGui.SameLine();
 
@@ -323,8 +323,7 @@ public class PosingGraphicalWindow : Window, IDisposable
                 posing.Selected = new BonePoseInfoId(parentBone!.Name, parentBone!.PartialId, PoseInfoSlot.Character);
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Select Parent");
+        ImBrio.SetItemTooltip("Select Parent");
 
         // Clear Selection
         ImGui.SameLine();
@@ -334,8 +333,7 @@ public class PosingGraphicalWindow : Window, IDisposable
                 posing.ClearSelection();
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Clear Selection");
+        ImBrio.SetItemTooltip("Clear Selection");
     }
 
     private void DrawImportButtons(PosingCapability posing)
@@ -532,7 +530,7 @@ public class PosingGraphicalWindow : Window, IDisposable
         {
             ImGui.Text("Graphical posing is only available for humanoid characters.");
             if(ImGui.Button("Make Human"))
-                appearance.MakeHuman();
+                appearance.MakeHuman().Observe("套用預設人類外觀");
 
             return;
         }

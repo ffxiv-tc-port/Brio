@@ -28,10 +28,10 @@ public unsafe class SkeletonService : IDisposable
     public event SkeletonUpdateEvent? SkeletonUpdateEnd;
 
     private delegate nint UpdateBonePhysicsDelegate(nint a1);
-    private readonly Hook<UpdateBonePhysicsDelegate> _updateBonePhysicsHook = null!;
+    private readonly Hook<UpdateBonePhysicsDelegate>? _updateBonePhysicsHook;
 
     private delegate void FinalizeSkeletonsDelegate(nint a1);
-    private readonly Hook<FinalizeSkeletonsDelegate> _finalizeSkeletonsHook = null!;
+    private readonly Hook<FinalizeSkeletonsDelegate>? _finalizeSkeletonsHook;
 
     private readonly EntityManager _entityManager;
     private readonly ObjectMonitorService _monitorService;
@@ -57,12 +57,10 @@ public unsafe class SkeletonService : IDisposable
 
 
         var updateBonePhysicsAddress = "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 41 54 41 56 48 83 EC ?? 48 8B 59 ?? 45 33 E4";
-        _updateBonePhysicsHook = hooking.HookFromAddress<UpdateBonePhysicsDelegate>(scanner.ScanText(updateBonePhysicsAddress), UpdateBonePhysicsDetour);
-        _updateBonePhysicsHook.Enable();
+        _updateBonePhysicsHook = NativeBinding.ScanHook<UpdateBonePhysicsDelegate>(scanner, hooking, updateBonePhysicsAddress, UpdateBonePhysicsDetour, "骨骼物理 UpdateBonePhysics");
 
         var finalizeSkeletonsHook = "40 53 55 57 41 55 48 83 EC 68"; // JMP in Framework.TaskRenderGraphicsRender
-        _finalizeSkeletonsHook = hooking.HookFromAddress<FinalizeSkeletonsDelegate>(scanner.ScanText(finalizeSkeletonsHook), FinalizeSkeletonsHook);
-        _finalizeSkeletonsHook.Enable();
+        _finalizeSkeletonsHook = NativeBinding.ScanHook<FinalizeSkeletonsDelegate>(scanner, hooking, finalizeSkeletonsHook, FinalizeSkeletonsHook, "骨骼結算 FinalizeSkeletons");
 
         _monitorService.CharacterBaseMaterialsUpdated += OnCharacterBaseMaterialsUpdate;
         _monitorService.CharacterBaseDestroyed += OnCharacterBaseCleanup;
@@ -275,6 +273,16 @@ public unsafe class SkeletonService : IDisposable
         var prop = info.PropagateComponents.HasFlag(TransformComponents.Position);
         var modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
 
+        // 🔴 AccessBoneModelSpace 的回傳值在解參之前一律判空,而且每一次重新取得之後都要再判一次。
+        // 判空擋得住的是 null(NullReferenceException,攔得到);真正致命的是「非 null 但無效」,
+        // 那是 AccessViolationException —— 在 .NET Core 屬於 corrupted-state exception,try/catch 完全無效。
+        // 所以這裡的防護是結構性的「不解參、直接放棄這一格」,不是靠例外隔離。
+        if(modelSpace == null)
+        {
+            LogNullModelSpaceOnce(boneId);
+            return;
+        }
+
         // Position
         temp = modelSpace;
         temp.Position += info.Transform.Position;
@@ -285,6 +293,12 @@ public unsafe class SkeletonService : IDisposable
             if(!info.IKInfo.EnforceConstraints)
             {
                 modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
+                if(modelSpace == null)
+                {
+                    LogNullModelSpaceOnce(boneId);
+                    return;
+                }
+
                 modelSpace->Translation = *(hkVector4f*)(&temp.Position);
             }
         }
@@ -296,6 +310,12 @@ public unsafe class SkeletonService : IDisposable
         // Rotation
         prop = info.PropagateComponents.HasFlag(TransformComponents.Rotation);
         modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
+        if(modelSpace == null)
+        {
+            LogNullModelSpaceOnce(boneId);
+            return;
+        }
+
         temp = modelSpace;
         temp.Rotation *= info.Transform.Rotation;
         modelSpace->Rotation = *(hkQuaternionf*)(&temp.Rotation);
@@ -303,9 +323,32 @@ public unsafe class SkeletonService : IDisposable
         // Scale
         prop = info.PropagateComponents.HasFlag(TransformComponents.Scale);
         modelSpace = pose->AccessBoneModelSpace(boneId, prop ? PropagateOrNot.Propagate : PropagateOrNot.DontPropagate);
+        if(modelSpace == null)
+        {
+            LogNullModelSpaceOnce(boneId);
+            return;
+        }
+
         temp = modelSpace;
         temp.Scale += info.Transform.Scale;
         modelSpace->Scale = *(hkVector4f*)(&temp.Scale);
+    }
+
+    private static bool _nullModelSpaceLogged;
+
+    /// <summary>
+    /// AccessBoneModelSpace 回 null 時記一次。這條路徑每幀、每根骨骼都會走到,
+    /// 所以只印第一次(要使用者回報的診斷,Information 級)。
+    /// </summary>
+    private static void LogNullModelSpaceOnce(int boneId)
+    {
+        if(_nullModelSpaceLogged)
+            return;
+        _nullModelSpaceLogged = true;
+
+        Brio.Log.Information(
+            $"[TC] AccessBoneModelSpace 對骨骼索引 {boneId} 回了 null,本次姿勢套用已略過。" +
+            "這一行只會印一次。若姿勢有部位套不上去,請連同本行一起回報。");
     }
 
     public void RefreshSkeletonCache()
@@ -404,7 +447,7 @@ public unsafe class SkeletonService : IDisposable
 
     private nint UpdateBonePhysicsDetour(nint a1)
     {
-        var result = _updateBonePhysicsHook.Original(a1);
+        var result = _updateBonePhysicsHook!.Original(a1);
         try
         {
             BeginSkeletonUpdate();
@@ -418,7 +461,7 @@ public unsafe class SkeletonService : IDisposable
 
     private void FinalizeSkeletonsHook(nint a1)
     {
-        _finalizeSkeletonsHook.Original(a1);
+        _finalizeSkeletonsHook!.Original(a1);
         try
         {
             FinalizeSkeletonUpdate();
@@ -431,8 +474,8 @@ public unsafe class SkeletonService : IDisposable
 
     public void Dispose()
     {
-        _updateBonePhysicsHook.Dispose();
-        _finalizeSkeletonsHook.Dispose();
+        _updateBonePhysicsHook?.Dispose();
+        _finalizeSkeletonsHook?.Dispose();
         _monitorService.CharacterBaseMaterialsUpdated -= OnCharacterBaseMaterialsUpdate;
         _monitorService.CharacterBaseDestroyed -= OnCharacterBaseCleanup;
     }

@@ -43,9 +43,18 @@ public static class CharacterExtensions
         return container.Kind != CompanionKind.None;
     }
 
-    public unsafe static CompanionContainer GetCompanionInfo(this ICharacter go)
+    public unsafe static CompanionContainer GetCompanionInfo(this ICharacter go) => GetCompanionInfo(go.Native());
+
+    /// <summary>
+    /// 直接由原生指標讀同伴資訊。呼叫端已經由物件表確認這個指標指向的物件還活著時用這支,
+    /// 就不必再解參一次 Address 已經凍結(可能懸空)的 ICharacter 包裝。
+    /// 內容與上面的 ICharacter 版本逐欄相同,只多了一道判空。
+    /// </summary>
+    public unsafe static CompanionContainer GetCompanionInfo(StructsCharacter* native)
     {
-        var native = go.Native();
+        if(native == null)
+            return new(CompanionKind.None, 0);
+
         if(native->CompanionObject != null)
         {
             if(native->OrnamentData.OrnamentObject != null)

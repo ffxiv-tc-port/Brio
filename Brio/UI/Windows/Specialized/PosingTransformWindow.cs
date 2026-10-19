@@ -92,8 +92,7 @@ public class PosingTransformWindow : Window
                 posing.Selected = new BonePoseInfoId(parentBone!.Name, parentBone!.PartialId, PoseInfoSlot.Character);
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Select Parent");
+        ImBrio.SetItemTooltip("Select Parent");
 
         // Clear Selection
         ImGui.SameLine();
@@ -103,8 +102,7 @@ public class PosingTransformWindow : Window
                 posing.ClearSelection();
         }
 
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Clear Selection");
+        ImBrio.SetItemTooltip("Clear Selection");
     }
 
     private unsafe void DrawGizmo()

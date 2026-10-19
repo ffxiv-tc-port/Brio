@@ -202,8 +202,7 @@ public static partial class ImBrio
 
         if(string.IsNullOrEmpty(hoverText) == false)
         {
-            if(ImGui.IsItemHovered())
-                ImGui.SetTooltip(hoverText);
+            SetItemTooltip(hoverText);
         }
 
         return clicked;
@@ -235,8 +234,7 @@ public static partial class ImBrio
 
         if(string.IsNullOrEmpty(hoverText) == false)
         {
-            if(ImGui.IsItemHovered())
-                ImGui.SetTooltip(hoverText);
+            SetItemTooltip(hoverText);
         }
 
         return clicked;
@@ -324,6 +322,9 @@ public static partial class ImBrio
     {
         if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
+            // 呼叫端常在 BeginDisabled 區段內（Style.Alpha 已乘上 DisabledAlpha），不推回 1 說明框會跟著變淡；
+            // 下面的 Disabled(false) 不會解除外層停用，所以要另外推。
+            using var tooltipAlpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, 1f);
             using(ImRaii.Disabled(false))
             {
                 using(ImRaii.Tooltip())
@@ -347,6 +348,26 @@ public static partial class ImBrio
             }
         }
     }
+
+    /// <summary>替上一個項目畫 SetTooltip 說明；項目停用時也畫。</summary>
+    /// <remarks>啟用時與 <c>if(ImGui.IsItemHovered()) ImGui.SetTooltip(text)</c> 完全相同。</remarks>
+    public static void SetItemTooltip(string text)
+    {
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            using var tooltipAlpha = PushDisabledTooltipAlpha();
+            ImGui.SetTooltip(text);
+        }
+    }
+
+    /// <summary>接在 <c>IsItemHovered(AllowWhenDisabled)</c> 為真之後：上一個項目停用才把 Alpha 推回 1，啟用時不推。</summary>
+    /// <remarks>
+    /// 此時不帶旗標的 <c>IsItemHovered()</c> 為假 ⇔ 項目停用（兩者只差停用判斷）。
+    /// 停用區段裡 Style.Alpha 已乘上 DisabledAlpha，不推回 1 說明框會跟著變淡。
+    /// </remarks>
+    public static ImRaii.Style PushDisabledTooltipAlpha()
+        => ImRaii.PushStyle(ImGuiStyleVar.Alpha, 1f, !ImGui.IsItemHovered());
+
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public static void VerticalPadding(float leng)
     {

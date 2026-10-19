@@ -1,5 +1,6 @@
 ﻿
 using Brio.Config;
+using Brio.Core;
 using Brio.Game.GPose;
 using Brio.Game.Types;
 using Brio.Resources;
@@ -35,9 +36,12 @@ public class WeatherService : IDisposable
 
     public bool WeatherOverrideEnabled
     {
-        get => _updateTerritoryWeatherHook.IsEnabled;
+        get => _updateTerritoryWeatherHook?.IsEnabled == true;
         set
         {
+            if(_updateTerritoryWeatherHook is null)
+                return;
+
             if(value != WeatherOverrideEnabled)
             {
                 if(value)
@@ -74,7 +78,7 @@ public class WeatherService : IDisposable
     private const float DefaultTransitionTime = 0.5f;
 
     private delegate void UpdateTerritoryWeatherDelegate(IntPtr a1, IntPtr a2);
-    private readonly Hook<UpdateTerritoryWeatherDelegate> _updateTerritoryWeatherHook = null!;
+    private readonly Hook<UpdateTerritoryWeatherDelegate>? _updateTerritoryWeatherHook;
 
     private readonly List<Weather> _territoryWeatherTable = [];
 
@@ -95,8 +99,9 @@ public class WeatherService : IDisposable
         _gPoseService = gPoseService;
         _configurationService = configurationService;
 
-        var twAddress = scanner.ScanText("48 89 5C 24 ?? 55 56 57 48 83 EC ?? 48 8B F9 48 8D 0D");
-        _updateTerritoryWeatherHook = hooking.HookFromAddress<UpdateTerritoryWeatherDelegate>(twAddress, UpdateTerritoryWeatherDetour);
+        _updateTerritoryWeatherHook = NativeBinding.ScanHook<UpdateTerritoryWeatherDelegate>(scanner, hooking,
+            "48 89 5C 24 ?? 55 56 57 48 83 EC ?? 48 8B F9 48 8D 0D",
+            UpdateTerritoryWeatherDetour, "凍結天氣 UpdateTerritoryWeather", enable: false);
 
         UpdateWeathersForCurrentTerritory();
 
@@ -165,7 +170,7 @@ public class WeatherService : IDisposable
         _clientState.TerritoryChanged -= OnTerritoryChanged;
         _gPoseService.OnGPoseStateChange -= OnGposeStateChanged;
         _territoryWeatherTable.Clear();
-        _updateTerritoryWeatherHook.Dispose();
+        _updateTerritoryWeatherHook?.Dispose();
     }
 }
 

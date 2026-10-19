@@ -1,4 +1,5 @@
 ﻿using Brio.Capabilities.Camera;
+using Brio.Core;
 using Brio.Entities;
 using Brio.Entities.Camera;
 using Brio.Game.Cutscene;
@@ -25,19 +26,19 @@ public unsafe class CameraService : IDisposable
     private readonly VirtualCameraManager _virtualCameraService;
 
     private delegate nint CameraCollisionDelegate(BrioCamera* a1, Vector3* a2, Vector3* a3, float a4, nint a5, float a6);
-    private readonly Hook<CameraCollisionDelegate> _cameraCollisionHook = null!;
+    private readonly Hook<CameraCollisionDelegate>? _cameraCollisionHook;
 
     private delegate nint CameraUpdateDelegate(BrioCamera* camera);
-    private readonly Hook<CameraUpdateDelegate> _cameraUpdateHook = null!;
+    private readonly Hook<CameraUpdateDelegate>? _cameraUpdateHook;
 
     private delegate nint CameraSceneUpdate(BrioSceneCamera* gsc);
-    private readonly Hook<CameraSceneUpdate> _cameraSceneUpdateHook = null!;
+    private readonly Hook<CameraSceneUpdate>? _cameraSceneUpdateHook;
 
     private delegate Matrix4x4* ProjectionMatrix(IntPtr ptr, float fov, float aspect, float nearPlane, float farPlane, float a6, float a7);
-    private static Hook<ProjectionMatrix> _projectionHook = null!;
+    private static Hook<ProjectionMatrix>? _projectionHook;
 
     private delegate void CameraMatrixLoadDelegate(BrioRenderCamera* camera, nint a1);
-    private readonly CameraMatrixLoadDelegate _cameraMatrixLoad;
+    private readonly CameraMatrixLoadDelegate? _cameraMatrixLoad;
 
     public CameraService(EntityManager entityManager, VirtualCameraManager virtualCameraService, CutsceneManager cutsceneManager, GPoseService gPoseService, ISigScanner scanner, IGameInteropProvider hooking)
     {
@@ -47,28 +48,29 @@ public unsafe class CameraService : IDisposable
         _virtualCameraService = virtualCameraService;
 
         var cameraProjection = "E8 ?? ?? ?? ?? EB ?? F3 0F ?? ?? ?? ?? ?? ?? F3 0F ?? ?? ?? ?? E8 ?? ?? ?? ?? 0F ?? ?? ?? 48 ?? ?? ??";
-        _projectionHook = hooking.HookFromAddress<ProjectionMatrix>(scanner.ScanText(cameraProjection), ProjectionDetour);
-        _projectionHook.Enable();
+        _projectionHook = NativeBinding.ScanHook<ProjectionMatrix>(scanner, hooking, cameraProjection, ProjectionDetour, "攝影機投影矩陣 ProjectionMatrix");
 
         var cameraCollisionAddr = "E8 ?? ?? ?? ?? 4C 8D 45 ?? 89 83";
-        _cameraCollisionHook = hooking.HookFromAddress<CameraCollisionDelegate>(scanner.ScanText(cameraCollisionAddr), CameraCollisionDetour);
-        _cameraCollisionHook.Enable();
+        _cameraCollisionHook = NativeBinding.ScanHook<CameraCollisionDelegate>(scanner, hooking, cameraCollisionAddr, CameraCollisionDetour, "攝影機碰撞 CameraCollision");
 
         var cameraUpdateAddr = "40 55 53 57 48 8D 6C 24 A0 48 81 EC ?? ?? ?? ?? 48 8B 1D";
-        _cameraUpdateHook = hooking.HookFromAddress<CameraUpdateDelegate>(scanner.ScanText(cameraUpdateAddr), CameraUpdateDetour);
-        _cameraUpdateHook.Enable();
+        _cameraUpdateHook = NativeBinding.ScanHook<CameraUpdateDelegate>(scanner, hooking, cameraUpdateAddr, CameraUpdateDetour, "攝影機更新 CameraUpdate");
 
+        // ⚠️ 台服上這條有 2 個命中,兩支都是「測 [rcx+0xF0] 位元 0 之後
+        //    把 rcx+0x50/0x60/0x70 餵給同一支矩陣函式」的場景攝影機更新,離線分不出哪一支才是
+        //    Brio 要的那個。取第一個(與上游在此客戶端上的實際行為相同)。
         var cameraSceneUpdateAddr = "48 ?? ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? F6 81 F0 ?? ?? ?? ?? 48 8B ??";
-        _cameraSceneUpdateHook = hooking.HookFromAddress<CameraSceneUpdate>(scanner.ScanText(cameraSceneUpdateAddr), CameraSceneUpdateDetour);
-        _cameraSceneUpdateHook.Enable();
+        _cameraSceneUpdateHook = NativeBinding.CreateHook<CameraSceneUpdate>(hooking,
+            NativeBinding.ScanAmbiguous(scanner, cameraSceneUpdateAddr, "場景攝影機更新 CameraSceneUpdate", offlineHitCount: 2),
+            CameraSceneUpdateDetour, "場景攝影機更新 CameraSceneUpdate");
 
-        var cameraMatrixLoadAddr = scanner.ScanText("E8 ?? ?? ?? ?? 48 8B 93 90 02 ?? ?? 48 8D 4C 24 40");
-        _cameraMatrixLoad = Marshal.GetDelegateForFunctionPointer<CameraMatrixLoadDelegate>(cameraMatrixLoadAddr);
+        var cameraMatrixLoadAddr = NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 48 8B 93 90 02 ?? ?? 48 8D 4C 24 40", "攝影機矩陣載入 CameraMatrixLoad");
+        _cameraMatrixLoad = NativeBinding.GetDelegate<CameraMatrixLoadDelegate>(cameraMatrixLoadAddr, "攝影機矩陣載入 CameraMatrixLoad");
     }
 
     private nint CameraUpdateDetour(BrioCamera* camera)
     {
-        var result = _cameraUpdateHook.Original(camera);
+        var result = _cameraUpdateHook!.Original(camera);
 
         if(_gPoseService.IsGPosing)
         {
@@ -91,12 +93,12 @@ public unsafe class CameraService : IDisposable
         if(_gPoseService.IsGPosing && _cutsceneManager.VirtualCamera.IsActiveCamera && _cutsceneManager.CameraSettings.EnableFOV)
             fov = _cutsceneManager.VirtualCamera.FoV;
 
-        return _projectionHook.Original(ptr, fov, aspect, nearPlane, farPlane, a6, a7);
+        return _projectionHook!.Original(ptr, fov, aspect, nearPlane, farPlane, a6, a7);
     }
 
     private nint CameraSceneUpdateDetour(BrioSceneCamera* gsc)
     {
-        var exec = _cameraSceneUpdateHook.Original(gsc);
+        var exec = _cameraSceneUpdateHook!.Original(gsc);
 
         if(_gPoseService.IsGPosing == false)
             return exec;
@@ -114,7 +116,7 @@ public unsafe class CameraService : IDisposable
         {
             gsc->ViewMatrix = _virtualCameraService.UpdateMatrix();
 
-            _cameraMatrixLoad(GetCurrentCamera()->Camera.CameraBase.SceneCamera.RenderCamera, (nint)(&gsc->ViewMatrix));
+            _cameraMatrixLoad?.Invoke(GetCurrentCamera()->Camera.CameraBase.SceneCamera.RenderCamera, (nint)(&gsc->ViewMatrix));
         }
         else if(_cutsceneManager.VirtualCamera.IsActiveCamera)
         {
@@ -125,7 +127,7 @@ public unsafe class CameraService : IDisposable
 
             gsc->ViewMatrix = camMatrix.Value;
 
-            _cameraMatrixLoad(GetCurrentCamera()->Camera.CameraBase.SceneCamera.RenderCamera, (nint)(&gsc->ViewMatrix));
+            _cameraMatrixLoad?.Invoke(GetCurrentCamera()->Camera.CameraBase.SceneCamera.RenderCamera, (nint)(&gsc->ViewMatrix));
         }
 
         return exec;
@@ -149,7 +151,7 @@ public unsafe class CameraService : IDisposable
             }
         }
 
-        return _cameraCollisionHook.Original(camera, a2, a3, a4, a5, a6);
+        return _cameraCollisionHook!.Original(camera, a2, a3, a4, a5, a6);
     }
 
     public BrioCamera* GetCurrentCamera()
@@ -159,9 +161,9 @@ public unsafe class CameraService : IDisposable
 
     public void Dispose()
     {
-        _cameraCollisionHook.Dispose();
-        _cameraUpdateHook.Dispose();
-        _cameraSceneUpdateHook.Dispose();
-        _projectionHook.Dispose();
+        _cameraCollisionHook?.Dispose();
+        _cameraUpdateHook?.Dispose();
+        _cameraSceneUpdateHook?.Dispose();
+        _projectionHook?.Dispose();
     }
 }

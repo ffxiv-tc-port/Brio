@@ -165,6 +165,12 @@ public class PosingCapability : ActorCharacterCapability
         bool asExpression = false, bool expressionPhase2 = false, bool asScene = false, bool asIPCpose = false, bool asBody = false, bool asProp = false,
         TransformComponents? transformComponents = null, bool? applyModelTransformOverride = null)
     {
+        // 🔴 本函式的三個入口全部是「延後好幾幀之後」才跑的。
+        // IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
+        // 角色不在了就整批不做,而不是崩潰。
+        if(Actor.IsGameObjectAlive == false)
+            return;
+
         var poseFile = rawPoseFile.Match(
                 poseFile => poseFile,
                 cmToolPoseFile => cmToolPoseFile.Upgrade()
@@ -241,7 +247,15 @@ public class PosingCapability : ActorCharacterCapability
         }
 
         if(generateSnapshot)
-            _framework.RunOnTick(() => Snapshot(reset, reconcile, asExpression: asExpression), delayTicks: 4);
+            _framework.RunOnTick(() =>
+            {
+                // 🔴 這是 4 幀之後才跑的。
+                // ⚠️ 閘門只加在這個「延後」的呼叫點:同步呼叫 Snapshot 的 UI 位置不受影響。
+                if(Actor.IsGameObjectAlive == false)
+                    return;
+
+                Snapshot(reset, reconcile, asExpression: asExpression);
+            }, delayTicks: 4);
     }
 
     public PoseFile ExportPose()
@@ -348,6 +362,12 @@ public class PosingCapability : ActorCharacterCapability
     {
         _framework.RunOnTick(() =>
         {
+            // 🔴 這是 2 幀之後才跑的,而且三個動作都會解參 GameObject。
+            // GameObject.Address 是建構當下凍結的,角色在這 2 幀之內消失就是懸空位址。
+            // IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
+            if(Actor.IsGameObjectAlive == false)
+                return;
+
             var all = new PoseImporterOptions(new BoneFilter(_posingService), TransformComponents.All, true);
             var poseFile = GeneratePoseFile();
             if(reset)

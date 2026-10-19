@@ -35,6 +35,13 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     private readonly GPoseService _gposeService;
     private readonly IFramework _framework;
+
+    /// <summary>
+    /// 主執行緒閘門。🔴 本檔有兩處在 <c>await</c> 之後呼叫 <see cref="ApplyShaderOverride"/>,
+    /// 而 <c>await</c> 的續行在執行緒池上(Dalamud 這個 pin 沒有安裝 SynchronizationContext,
+    /// 而 UI／事件回呼進來時 <c>TaskScheduler.Current</c> 就是 Default)。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly MCDFService _mCDFService;
 
     public string CurrentCollection => _penumbraService.GetCollectionForObject(Character);
@@ -90,6 +97,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         _gposeService = gPoseService;
         _customizePlusService = customizePlusService;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _entityManager = entityManager;
         _mCDFService = mCDFService;
         _targetService = targetService;
@@ -164,7 +172,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         if(!IsCollectionOverridden && old is not null)
             _oldCollection = old.ToString();
 
-        _ = _actorAppearanceService.Redraw(Character, HasMCDF);
+        _actorAppearanceService.Redraw(Character, HasMCDF).Observe("套用 Penumbra 合集後重繪角色");
     }
     public void ResetCollection()
     {
@@ -172,14 +180,15 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         {
             _penumbraService.SetCollectionForObject(Character, Guid.Parse(_oldCollection!));
             _oldCollection = null;
-            _ = _actorAppearanceService.Redraw(Character, HasMCDF);
+            _actorAppearanceService.Redraw(Character, HasMCDF).Observe("還原 Penumbra 合集後重繪角色");
         }
     }
 
     public void SetDesign(Guid design)
     {
-        IsDesignOverridden = true;
-        _ = _glamourerService.ApplyDesign(design, Character);
+        // 只有 Glamourer 真的接受了這次套用才記成「已覆寫」——
+        // 否則之後的 ResetDesign 會對一個從來沒套上去的設計做還原。
+        IsDesignOverridden = _glamourerService.ApplyDesign(design, Character);
     }
     public void ResetDesign(bool checkResetLock = true)
     {
@@ -187,7 +196,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         {
             HasMCDF = false;
             IsDesignOverridden = false;
-            _glamourerService.RevertCharacter(Character);
+            _glamourerService.RevertCharacter(Character).Observe("還原 Glamourer 設計");
 
             if(checkResetLock && _glamourerService.CheckForLock(Character))
             {
@@ -256,19 +265,35 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         }
     }
 
-    public async void SetAppearanceAsTask(ActorAppearance appearance, AppearanceImportOptions options)
-        => await SetAppearance(appearance, options);
+    // 刻意不是 async void:那種寫法的未處理例外不會進任何 Task,而是直接變成行程層級的未處理例外。
+    public void SetAppearanceAsTask(ActorAppearance appearance, AppearanceImportOptions options)
+        => SetAppearance(appearance, options).Observe("SetAppearanceAsTask 套用外觀");
 
     public async Task SetAppearance(ActorAppearance appearance, AppearanceImportOptions options)
     {
-        Brio.Log.Debug($"Setting appearance for gameobject {GameObject.ObjectIndex}...");
+        // 🔴 這支有好幾個呼叫端是延後 1~12 幀之後才跑的 RunOnTick 回呼 (SceneService.LoadProp / SceneService.ApplyDataToActor)。
+        // IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址。
+        if(Actor.IsGameObjectAlive == false)
+        {
+            Brio.Log.Info("套用外觀略過:目標角色已經不在物件表裡。");
+            return;
+        }
+
+        // 上一行剛確認過物件還在表裡,這次解參安全。抄成區域變數是因為函式尾端那行 log 是在數個
+        // await 之後才跑的 —— 那時再讀一次 GameObject.ObjectIndex 就成了跨幀解參
+        // (內插字串一定會被求值,與 log 等級無關)。
+        var objectIndex = GameObject.ObjectIndex;
+
+        Brio.Log.Debug($"Setting appearance for gameobject {objectIndex}...");
 
         _originalAppearance ??= _actorAppearanceService.GetActorAppearance(Character);
         _ = await _actorAppearanceService.SetCharacterAppearance(Character, appearance, options);
 
+        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上。
+        // 📌 else 那一支(_modelShaderOverride.Reset())是純受管理的欄位清零,不需要轉派。
         if(options.HasFlag(AppearanceImportOptions.Shaders))
         {
-            ApplyShaderOverride();
+            await _gate.RunAsync("ActorAppearanceCapability.SetAppearance.shaders", ApplyShaderOverride);
         }
         else
         {
@@ -281,7 +306,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
                 AttachWeapon();
             }, delayTicks: 5);
 
-        Brio.Log.Debug($"Appearance set for gameobject {GameObject.ObjectIndex}.");
+        Brio.Log.Debug($"Appearance set for gameobject {objectIndex}.");
     }
 
     public void ImportAppearance(string file, AppearanceImportOptions options)
@@ -294,7 +319,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
         }
 
         if(doc != null)
-            _ = SetAppearance(doc, options);
+            SetAppearance(doc, options).Observe("匯入 Anamnesis 外觀檔");
     }
 
     public unsafe void ExportAppearance(string file)
@@ -382,7 +407,8 @@ public class ActorAppearanceCapability : ActorCharacterCapability
     {
         await _actorAppearanceService.Redraw(Character, HasMCDF);
 
-        ApplyShaderOverride();
+        // 🔴 同 SetAppearance:await 之後的續行在執行緒池上,而 ApplyShaderOverride 會解原生指標。
+        await _gate.RunAsync("ActorAppearanceCapability.Redraw.shaders", ApplyShaderOverride);
 
         if(Entity is ActorEntity actor && actor.IsProp == true)
             await _framework.RunOnTick(() =>
@@ -397,7 +423,7 @@ public class ActorAppearanceCapability : ActorCharacterCapability
     {
         if(HasMCDF)
         {
-            _ = _characterHandlerService.Revert(GameObject);
+            _characterHandlerService.Revert(GameObject).Observe("重設外觀時還原 MCDF");
             HasMCDF = false;
         }
         else
@@ -418,6 +444,12 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     public unsafe void AttachWeapon()
     {
+        // 🔴 這支有四個呼叫端都是延後 5~10 幀的 RunOnTick 回呼(本檔 SetAppearance / Redraw、ActorSpawnService.SpawnNewProp、SceneService.LoadProp)。
+        // IsGameObjectAlive 只讀物件表自己的指標陣列(GetObjectAddress),不解參任何存下來的位址,是安全的存活檢查。
+        // 擋在這裡一次,四個延後呼叫端就一起安全了。
+        if(Actor.IsGameObjectAlive == false)
+            return;
+
         Character.Native()->Timeline.TimelineSequencer.PlayTimeline(5616);
     }
 
@@ -436,6 +468,14 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
     private unsafe void ApplyShaderOverride()
     {
+        // 🔴 兩個呼叫端都在 await 之後(本檔 SetAppearance 與 Redraw),而中間那次 SetCharacterAppearance／Redraw 會等完整重繪(最多 200 幀)。
+        // 回到框架執行緒防不了這件事,一定要先由物件表確認它還在。
+        if(Actor.IsGameObjectAlive == false)
+        {
+            Brio.Log.Information("角色在重繪期間消失,略過外觀套用(著色器覆寫)。");
+            return;
+        }
+
         var shaders = Character.GetShaderParams();
         if(shaders != null)
         {
@@ -450,13 +490,13 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
         ResetCollection();
         ResetProfile();
-        _ = ResetAppearance();
+        ResetAppearance().Observe("離開 GPose 時重設外觀");
     }
 
     private void OnPenumbraRedraw(int gameObjectId)
     {
         if(Character.ObjectIndex == gameObjectId && IsAppearanceOverridden)
-            _ = SetAppearance(CurrentAppearance, AppearanceImportOptions.All);
+            SetAppearance(CurrentAppearance, AppearanceImportOptions.All).Observe("Penumbra 重繪後重新套用外觀");
     }
 
     public override void Dispose()
@@ -466,6 +506,6 @@ public class ActorAppearanceCapability : ActorCharacterCapability
 
         ResetCollection();
         ResetProfile();
-        _ = ResetAppearance();
+        ResetAppearance().Observe("卸載能力時重設外觀");
     }
 }

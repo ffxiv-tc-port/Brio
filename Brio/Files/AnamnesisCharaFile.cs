@@ -4,6 +4,7 @@ using Brio.Entities;
 using Brio.Entities.Actor;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Actor.Interop;
+using Brio.Game.Core;
 using Brio.Library.Tags;
 using Brio.Resources;
 using Dalamud.Interface.Textures.TextureWraps;
@@ -24,7 +25,7 @@ public class AnamnesisCharaFileInfo(EntityManager entityManager, ConfigurationSe
         Brio.Log.Debug($"Name: {Name} | File: {file}");
         if(actor.TryGetCapability<ActorAppearanceCapability>(out ActorAppearanceCapability? capability) && capability != null)
         {
-            _ = capability.SetAppearance(file, AppearanceImportOptions.All);
+            capability.SetAppearance(file, AppearanceImportOptions.All).Observe("從資料庫套用 Anamnesis 外觀檔");
         }
     }
 }
@@ -105,6 +106,10 @@ public class AnamnesisCharaFile : JsonDocumentBase
         tags.Add(this.Gender.ToDisplayName());
         tags.Add(this.Tribe.ToDisplayName());
     }
+
+    // 這個類別沒有檔名欄位，能識別一份 chara 的只有版本、作者與外觀。
+    public override string ToString()
+        => $"chara v{Version ?? "?"} by {Author ?? "?"} [{Race.ToDisplayName()} {Tribe.ToDisplayName()} {Gender.ToDisplayName()} model={ModelType}]";
 
     public static implicit operator ActorAppearance(AnamnesisCharaFile chara)
     {

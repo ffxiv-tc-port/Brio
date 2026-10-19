@@ -41,15 +41,13 @@ public class FileUIHelpers
                 {
                     projectWindow.IsOpen = true;
                 }
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Save or Load this Scene");
+                ImBrio.SetItemTooltip("Save or Load this Scene");
 
                 if(ImGui.Button("View Auto-Saves"))
                 {
                     autoSaveService.ShowAutoSaves();
                 }
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("View Scene Auto-Saves");
+                ImBrio.SetItemTooltip("View Scene Auto-Saves");
 
                 ImGui.Separator();
 
@@ -298,7 +296,7 @@ public class FileUIHelpers
             {
                 if(r is ActorAppearanceUnion appearance)
                 {
-                    _ = capability.SetAppearance(appearance, options);
+                    capability.SetAppearance(appearance, options).Observe("從資料庫匯入角色外觀");
                 }
                 else if(r is AnamnesisCharaFile appearanceFile)
                 {
@@ -307,11 +305,11 @@ public class FileUIHelpers
                         BrioHuman.ShaderParams shaderParams = appearanceFile;
                         BrioUtilities.ImportShadersFromFile(ref capability._modelShaderOverride, shaderParams);
                     }
-                    _ = capability.SetAppearance(appearanceFile, options);
+                    capability.SetAppearance(appearanceFile, options).Observe("從資料庫匯入 Anamnesis 外觀檔");
                 }
                 else if(r is MareCharacterDataFile mareFile)
                 {
-                    _ = capability.LoadMCDF(mareFile.GetPath());
+                    capability.LoadMCDF(mareFile.GetPath()).Observe("從資料庫匯入 MCDF");
                 }
             });
 
@@ -322,7 +320,7 @@ public class FileUIHelpers
             {
                 if(r is ActorAppearanceUnion appearance)
                 {
-                    _ = capability.SetAppearance(appearance, options);
+                    capability.SetAppearance(appearance, options).Observe("從檔案匯入角色外觀");
                 }
                 else if(r is AnamnesisCharaFile appearanceFile)
                 {
@@ -331,11 +329,11 @@ public class FileUIHelpers
                         BrioHuman.ShaderParams shaderParams = appearanceFile;
                         BrioUtilities.ImportShadersFromFile(ref capability._modelShaderOverride, shaderParams);
                     }
-                    _ = capability.SetAppearance(appearanceFile, options);
+                    capability.SetAppearance(appearanceFile, options).Observe("從檔案匯入 Anamnesis 外觀檔");
                 }
                 else if(r is MareCharacterDataFile mareFile)
                 {
-                    _ = capability.LoadMCDF(mareFile.GetPath());
+                    capability.LoadMCDF(mareFile.GetPath()).Observe("從檔案匯入 MCDF");
                 }
             });
         }
@@ -378,7 +376,7 @@ public class FileUIHelpers
                              ConfigurationService.Instance.Configuration.LastMCDFPath = directory;
                              ConfigurationService.Instance.Save();
                          }
-                         _ = capability.LoadMCDF(path);
+                         capability.LoadMCDF(path).Observe("匯入 MCDF");
                      }
                  }, 1, ConfigurationService.Instance.Configuration.LastMCDFPath, true);
     }
@@ -401,7 +399,7 @@ public class FileUIHelpers
                              ConfigurationService.Instance.Save();
                          }
 
-                         _ = capability.SaveMcdf(path, string.Empty);
+                         capability.SaveMcdf(path, string.Empty).Observe("匯出 MCDF");
                      }
                  }, ConfigurationService.Instance.Configuration.MCDF.LastSavedCharaDataLocation, true);
     }

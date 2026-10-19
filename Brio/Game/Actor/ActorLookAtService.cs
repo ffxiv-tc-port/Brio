@@ -7,6 +7,7 @@
 
 #nullable disable
 
+using Brio.Core;
 using Brio.Game.Actor.Extensions;
 using Brio.Game.Camera;
 using Brio.Game.GPose;
@@ -48,12 +49,12 @@ public unsafe class ActorLookAtService : IDisposable
         _objectTable = objectTable;
         _virtualCameraManager = virtualCameraManager;
 
-        var updateFaceTrackerAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 8B D7 48 8B CB E8 ?? ?? ?? ?? 41 ?? ?? 8B D7 48 ?? ?? 48 ?? ?? ?? ?? 48 83 ?? ?? 5F");
+        var updateFaceTrackerAddress = NativeBinding.Scan(sigScanner, "E8 ?? ?? ?? ?? 8B D7 48 8B CB E8 ?? ?? ?? ?? 41 ?? ?? 8B D7 48 ?? ?? 48 ?? ?? ?? ?? 48 83 ?? ?? 5F", "視線更新 UpdateLookAt");
         _updateLookAt = (delegate* unmanaged<CharacterLookAtController*, LookAtTarget*, uint, nint, void>)updateFaceTrackerAddress;
 
-        var actorLookAtLoopAddress = sigScanner.ScanText("E8 ?? ?? ?? ?? 48 83 C3 08 48 83 EF 01 75 CF 48 ?? ?? ?? ?? 48");
-        _actorLookAtLoop = hooks.HookFromAddress<ActorLookAtLoopDelegate>(actorLookAtLoopAddress, ActorLookAtDetour);
-        _actorLookAtLoop.Enable();
+        _actorLookAtLoop = NativeBinding.ScanHook<ActorLookAtLoopDelegate>(sigScanner, hooks,
+            "E8 ?? ?? ?? ?? 48 83 C3 08 48 83 EF 01 75 CF 48 ?? ?? ?? ?? 48",
+            ActorLookAtDetour, "視線迴圈 ActorLookAtLoop");
 
         _gPoseService.OnGPoseStateChange += OnGPoseStateChange;
     }
@@ -87,12 +88,16 @@ public unsafe class ActorLookAtService : IDisposable
 
                 var lookAtController = &((Character*)targetActor.Address)->LookAt.Controller;
 
-                if(lookAtDataHolder.TargetType.HasFlag(LookAtTargetType.Body))
-                    _updateLookAt(lookAtController, &lookAt.Body.LookAtTarget, 0, 0); // 0 == Body
-                if(lookAtDataHolder.TargetType.HasFlag(LookAtTargetType.Head))
-                    _updateLookAt(lookAtController, &lookAt.Head.LookAtTarget, 1, 0); // 1 == Head
-                if(lookAtDataHolder.TargetType.HasFlag(LookAtTargetType.Eyes))
-                    _updateLookAt(lookAtController, &lookAt.Eyes.LookAtTarget, 2, 0); // 2 == Eyes
+                // 特徵碼失效時 _updateLookAt 為 null;呼叫 null 函式指標是 AVE(try/catch 攔不到)。
+                if(_updateLookAt != null)
+                {
+                    if(lookAtDataHolder.TargetType.HasFlag(LookAtTargetType.Body))
+                        _updateLookAt(lookAtController, &lookAt.Body.LookAtTarget, 0, 0); // 0 == Body
+                    if(lookAtDataHolder.TargetType.HasFlag(LookAtTargetType.Head))
+                        _updateLookAt(lookAtController, &lookAt.Head.LookAtTarget, 1, 0); // 1 == Head
+                    if(lookAtDataHolder.TargetType.HasFlag(LookAtTargetType.Eyes))
+                        _updateLookAt(lookAtController, &lookAt.Eyes.LookAtTarget, 2, 0); // 2 == Eyes
+                }
             }
         }
 
@@ -205,7 +210,7 @@ public unsafe class ActorLookAtService : IDisposable
 
     public void Dispose()
     {
-        _actorLookAtLoop.Dispose();
+        _actorLookAtLoop?.Dispose();
 
         _gPoseService.OnGPoseStateChange -= OnGPoseStateChange;
 

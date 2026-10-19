@@ -49,7 +49,14 @@ public unsafe class EntityActorManager : IDisposable
     {
         foreach(var go in _objects)
         {
-            AttachActor(go, _actorContainerEntity);
+            // 🔴 IObjectTable 的索引子/列舉回傳的是**每個槽預先配置、每次讀取就地改寫 Address** 的共用包裝物件(Dalamud ObjectTable.CachedEntry.Update)。
+            // 之後只要有人讀同一個槽,已存的 ActorEntity.GameObject.Address 就會靜默指向別人,但它的 EntityId 還停在舊位址(對不上 ⇒ 移除不掉,而姿勢寫入會寫到別的角色身上)。
+            // CreateObjectReference 會配一個獨立實例,與 OnCharacterInitialized 走的是同一條路。
+            var owned = _objects.CreateObjectReference(go.Address);
+            if(owned is null)
+                continue;
+
+            AttachActor(owned, _actorContainerEntity);
         }
     }
 
@@ -145,13 +152,30 @@ public unsafe class EntityActorManager : IDisposable
 
     private void OnCharacterInitialized(NativeCharacter* chara)
     {
+        // 🔴 絕不把原生指標帶過幀。RunOnTick 沒給延遲時最快也要等到「下一個 framework tick」。
+        // ⇒ 懸空位址一定會被解參考,而 AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 與例外隔離完全攔不到。
+        // 正解 = 抄走「物件表索引」這個值型別,下一幀再由物件表重查位址 (與 ActorEntity.IsGameObjectAlive 用的是同一套做法)。
+        // 📌 事件發生時 ObjectIndex 必定已經寫好,這裡讀到的索引就是最終值。
+        var initializedObjectIndex = chara->GameObject.ObjectIndex;
+
         // We wait for one frame on create to ensure that the actor is fully initialized
-        _framework.RunOnTick(() =>
-        {
-            var go = _objects.CreateObjectReference((nint)chara);
-            if(go != null)
-                AttachActor(go, _actorContainerEntity);
-        });
+        _framework.RunOnTick(() => AttachActorByObjectIndex(initializedObjectIndex));
+    }
+
+    /// <summary>
+    /// 由物件表索引重新取得角色再附加。GetObjectAddress 只讀物件表自己的指標陣列(IndexSorted),
+    /// 不解參任何先前存下來的位址,所以角色若在這一幀之前就消失了,拿到的是 nint.Zero 而不是懸空位址。
+    /// 槽位被別的角色接手時拿到的也是活著的物件(AttachActor 自己的 IsGPose 檢查會把不相干的擋掉)。
+    /// </summary>
+    private void AttachActorByObjectIndex(ushort objectIndex)
+    {
+        var address = _objects.GetObjectAddress(objectIndex);
+        if(address == nint.Zero)
+            return;
+
+        var go = _objects.CreateObjectReference(address);
+        if(go != null)
+            AttachActor(go, _actorContainerEntity);
     }
 
 

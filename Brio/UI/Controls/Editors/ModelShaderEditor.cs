@@ -1,6 +1,7 @@
 ﻿using Brio.Capabilities.Actor;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Actor.Interop;
+using Brio.Game.Core;
 using Brio.UI.Controls.Stateless;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -38,7 +39,7 @@ public class ModelShaderEditor()
         if(ImBrio.FontIconButtonRight("reset_shaders", FontAwesomeIcon.Undo, 1, "Reset Shaders", shaderChange))
         {
             apply.Reset();
-            _ = _capability.Redraw();
+            _capability.Redraw().Observe("套用著色器覆寫後重繪");
         }
         ImGui.SetCursorPos(resetTo);
 

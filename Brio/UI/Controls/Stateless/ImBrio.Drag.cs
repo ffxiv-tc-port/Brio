@@ -125,9 +125,14 @@ public static partial class ImBrio
         ImGui.SetNextItemWidth(entryWidth);
 
         changed |= ImGui.DragFloat($"##{label}_X", ref value.X, step / 10);
+        // 說明停用時也要出現，滾輪改值只在啟用時生效，所以兩個判斷分開寫。
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            using var tooltipAlpha = PushDisabledTooltipAlpha();
+            ImGui.SetTooltip($" X {toolTip ?? ""}");
+        }
         if(ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($" X {toolTip ?? ""}");
             float mouseWheel = ImGui.GetIO().MouseWheel / 10;
             if(mouseWheel != 0)
             {
@@ -141,9 +146,13 @@ public static partial class ImBrio
         ImGui.SetNextItemWidth(entryWidth);
 
         changed |= ImGui.DragFloat($"##{label}_Y", ref value.Y, step / 10);
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            using var tooltipAlpha = PushDisabledTooltipAlpha();
+            ImGui.SetTooltip($" Y {toolTip ?? ""}");
+        }
         if(ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($" Y {toolTip ?? ""}");
             float mouseWheel = ImGui.GetIO().MouseWheel / 10;
             if(mouseWheel != 0)
             {
@@ -157,9 +166,13 @@ public static partial class ImBrio
         ImGui.SetNextItemWidth(entryWidth);
 
         changed |= ImGui.DragFloat($"##{label}_Z", ref value.Z, step / 10);
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            using var tooltipAlpha = PushDisabledTooltipAlpha();
+            ImGui.SetTooltip($" Z {toolTip ?? ""}");
+        }
         if(ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($" Z {toolTip ?? ""}");
             float mouseWheel = ImGui.GetIO().MouseWheel / 10;
             if(mouseWheel != 0)
             {
@@ -210,9 +223,14 @@ public static partial class ImBrio
         changed |= ImGui.DragFloat($"##{label}_drag", ref value, step / 10.0f);
         active |= ImGui.IsItemActive();
 
+        // 說明停用時也要出現，滾輪改值只在啟用時生效，所以兩個判斷分開寫。
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            using var tooltipAlpha = PushDisabledTooltipAlpha();
+            ImGui.SetTooltip($"{tooltip}");
+        }
         if(ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($"{tooltip}");
             float mouseWheel = ImGui.GetIO().MouseWheel / 10;
             if(mouseWheel != 0)
             {
@@ -301,9 +319,14 @@ public static partial class ImBrio
         }
         active |= ImGui.IsItemActive();
 
+        // 說明停用時也要出現，滾輪改值只在啟用時生效，所以兩個判斷分開寫。
+        if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            using var tooltipAlpha = PushDisabledTooltipAlpha();
+            ImGui.SetTooltip($"{tooltip}");
+        }
         if(ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($"{tooltip}");
             float mouseWheel = ImGui.GetIO().MouseWheel / 10;
             if(mouseWheel != 0)
             {

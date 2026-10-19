@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Game.Core;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -51,6 +52,14 @@ public class PenumbraService : BrioIPC
     private readonly ConfigurationService _configurationService;
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly IFramework _framework;
+    /// <summary>存活檢查用。只讀物件表自己的指標陣列,不解參任何存下來的位址。</summary>
+    private readonly IObjectTable _objectTable;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// ⇒ 轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
 
     //private readonly GetEnabledState _penumbraEnabled;
     private readonly ApiVersion _penumbraApiVersion;
@@ -73,6 +82,7 @@ public class PenumbraService : BrioIPC
 
     private readonly SetCollectionForObject _penumbraSetCollectionForObject;
     private readonly GetCollectionForObject _penumbraGetCollectionForObject;
+    private readonly SetCutsceneParentIndex _penumbraSetCutsceneParentIndex;
     private readonly GetCollections _penumbraGetCollections;
 
     private readonly CreateTemporaryCollection _penumbraCreateNamedTemporaryCollection;
@@ -90,11 +100,13 @@ public class PenumbraService : BrioIPC
     private readonly GetPlayerMetaManipulations _penumbraGetMetaManipulations;
     //private readonly ConvertTextureFile _penumbraConvertTextureFile;
 
-    public PenumbraService(IDalamudPluginInterface pluginInterface, IFramework framework, ConfigurationService configurationService)
+    public PenumbraService(IDalamudPluginInterface pluginInterface, IFramework framework, IObjectTable objectTable, ConfigurationService configurationService)
     {
         _pluginInterface = pluginInterface;
         _configurationService = configurationService;
         _framework = framework;
+        _objectTable = objectTable;
+        _gate = new IpcFrameworkGate(framework);
 
         _penumbraInitializedSubscriber = Initialized.Subscriber(_pluginInterface, OnConfigurationChanged);
         _penumbraDisposedSubscriber = Disposed.Subscriber(_pluginInterface, OnConfigurationChanged);
@@ -103,6 +115,7 @@ public class PenumbraService : BrioIPC
 
         _penumbraGetCollectionForObject = new GetCollectionForObject(_pluginInterface);
         _penumbraSetCollectionForObject = new SetCollectionForObject(_pluginInterface);
+        _penumbraSetCutsceneParentIndex = new SetCutsceneParentIndex(_pluginInterface);
         _penumbraGetCollections = new GetCollections(_pluginInterface);
         _penumbraOpenMainWindow = new OpenMainWindow(_pluginInterface);
         _penumbraApiVersion = new ApiVersion(_pluginInterface);
@@ -164,19 +177,38 @@ public class PenumbraService : BrioIPC
         return collection.Name;
     }
 
+    /// <summary>
+    /// 把指定角色指派到某個 Penumbra 集合,並回傳「還原時該指回去的集合」。
+    /// 回傳 <c>null</c> 代表「沒有可還原的目標」(Penumbra 不在、指派被拒、或問不到目前生效的集合),
+    /// 呼叫端不可以把它當成有效集合拿去還原。
+    /// </summary>
     public Guid? SetCollectionForObject(IGameObject gameObject, Guid collectionName)
     {
         if(IsAvailable == false || gameObject is null)
-            return Guid.Empty;
+            return null;
 
         Brio.Log.Debug($"Setting GameObject {gameObject.ObjectIndex} collection to {collectionName}");
 
-        var (_, oldCollection) = _penumbraSetCollectionForObject.Invoke(gameObject.ObjectIndex, collectionName, true, true);
+        // 先問「這一格現在生效的是哪個集合」。Brio 生成的角色通常沒有個別指派,
+        // 下面 SetCollectionForObject 回來的舊集合會是 null —— 那時只有這個值能拿來還原。
+        var (objectValid, _, effectiveCollection) = _penumbraGetCollectionForObject.Invoke(gameObject.ObjectIndex);
 
-        if(oldCollection is null)
+        var (result, oldCollection) = _penumbraSetCollectionForObject.Invoke(gameObject.ObjectIndex, collectionName, true, true);
+        if(result is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
+        {
+            Brio.Log.Information($"Penumbra rejected assigning GameObject {gameObject.ObjectIndex} to collection {collectionName}: {result}");
             return null;
+        }
 
-        return oldCollection.Value.Id;
+        if(oldCollection is not null)
+            return oldCollection.Value.Id;
+
+        // 這裡刻意與上游 cycleapple 的寫法有兩點不同:
+        // (1) 失敗一律回 null,不回 Guid.Empty。回 Guid.Empty 會讓它把全 0 的假集合記成待還原目標,ResetCollection 反而會把角色指到不存在的集合。
+        // (2) 不拿 objectValid 當提前 return 的閘門。
+        // 真正的權威是 SetCollectionForObject 自己的回傳碼(上面已經檢查過)。
+        // objectValid 為 false 時 effectiveCollection 不可信,所以只在這裡當成「沒有舊集合」。
+        return objectValid ? effectiveCollection.Id : null;
     }
 
     public Dictionary<Guid, string> GetCollections()
@@ -185,6 +217,24 @@ public class PenumbraService : BrioIPC
             return null!;
 
         return _penumbraGetCollections.Invoke();
+    }
+
+    /// <summary>
+    /// 讓 Penumbra 把這一格當成獨立角色,而不是「某個角色的過場複製體」。
+    /// </summary>
+    /// <param name="objectIndex">刻意收索引而不是 <c>IGameObject</c>:本 pin 的物件表包裝是每格重用、存取時就地改寫 Address,跨幀持有會靜默換人。</param>
+    public void DetachCutsceneActor(ushort objectIndex)
+    {
+        if(IsAvailable == false)
+            return;
+
+        // -1 = 沒有過場母體。
+        // Penumbra 只在它自己認定的過場索引範圍內接受這個呼叫,超出範圍會回 InvalidArgument。
+        // 這裡不自己手刻範圍檢查(抄上游手刻的邊界很容易差一),改成把 Penumbra 的回傳碼
+        // 原樣寫進 log,實機上一看就知道有沒有生效。
+        var result = _penumbraSetCutsceneParentIndex.Invoke(objectIndex, -1);
+        if(result != PenumbraApiEc.Success)
+            Brio.Log.Information($"Penumbra could not detach GameObject {objectIndex} from its cutscene parent: {result}");
     }
 
     private void ResourceLoaded(IntPtr ptr, string arg1, string arg2)
@@ -200,17 +250,35 @@ public class PenumbraService : BrioIPC
         return await _penumbraResolvePaths.Invoke(forward, reverse).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// 呼叫端已經在 framework 執行緒上確認過角色還在物件表裡、並且<b>在同一個回呼裡</b>把索引讀出來時用這一支。
+    /// 另一個多載是在它自己的 framework 回呼裡才去解參考 <c>IGameObject.ObjectIndex</c> —— 那已經是後來的某一幀,
+    /// 角色若在這之間消失就是懸空讀,而 AccessViolationException 在 .NET Core 攔不到。
+    /// </summary>
+    public async Task<Dictionary<string, HashSet<string>>?> GetCharacterData(ushort objectIndex)
+    {
+        if(IsAvailable == false) return null;
+
+        return await _gate.RunAsync<Dictionary<string, HashSet<string>>?>("Penumbra.GetGameObjectResourcePaths", () =>
+        {
+            Brio.Log.Debug("Calling On IPC: Penumbra.GetGameObjectResourcePaths");
+            return _penumbraResourcePaths.Invoke(objectIndex)[0];
+        }, null).ConfigureAwait(false);
+    }
+
     public async Task<Dictionary<string, HashSet<string>>?> GetCharacterData(IGameObject gameObject)
     {
         if(IsAvailable == false) return null;
 
-        return await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒,所以過閘門;
+        //    卸載期從別的執行緒進來時不執行 body(那時轉派會就地在呼叫端執行緒執行)。
+        return await _gate.RunAsync<Dictionary<string, HashSet<string>>?>("Penumbra.GetGameObjectResourcePaths(IGameObject)", () =>
         {
             Brio.Log.Debug("Calling On IPC: Penumbra.GetGameObjectResourcePaths");
             var idx = gameObject?.ObjectIndex;
             if(idx == null) return null;
             return _penumbraResourcePaths.Invoke(idx.Value)[0];
-        }).ConfigureAwait(false);
+        }, null).ConfigureAwait(false);
     }
 
     public string GetMetaManipulations()
@@ -225,7 +293,10 @@ public class PenumbraService : BrioIPC
     public async Task RemoveTemporaryCollectionAsync(Guid applicationId, Guid collId)
     {
         if(!IsAvailable) return;
-        await _framework.RunOnFrameworkThread(() =>
+
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒,所以過閘門;
+        //    卸載期從別的執行緒進來時不執行 body(那時轉派會就地在呼叫端執行緒執行)。
+        await _gate.RunAsync("Penumbra.RemoveTemporaryCollection", () =>
         {
             Brio.Log.Debug("[{applicationId}] Removing temp collection for {collId}", applicationId, collId);
             var ret2 = _penumbraRemoveTemporaryCollection.Invoke(collId);
@@ -237,33 +308,41 @@ public class PenumbraService : BrioIPC
     {
         if(!IsAvailable) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒,所以過閘門;
+        //    卸載期從別的執行緒進來時不執行 body(那時轉派會就地在呼叫端執行緒執行)。
+        //    回值本來就被丟掉,卸載期的 Guid.Empty 不會被任何人看到。
+        await _gate.RunAsync("Penumbra.AssignTemporaryCollection", () =>
         {
             var retAssign = _penumbraAssignTemporaryCollection.Invoke(collName, idx, forceAssignment: true);
             Brio.Log.Debug("Assigning Temp Collection {collName} to index {idx}, Success: {ret}", collName, idx, retAssign);
             return collName;
-        }).ConfigureAwait(false);
+        }, Guid.Empty).ConfigureAwait(false);
     }
 
     public async Task<Guid> CreateTemporaryCollectionAsync(string uid)
     {
         if(!IsAvailable) return Guid.Empty;
 
-        return await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒,所以過閘門;
+        //    卸載期從別的執行緒進來時不執行 body(那時轉派會就地在呼叫端執行緒執行)。
+        //    卸載期回 Guid.Empty —— 那正是本方法自己在 !IsAvailable 時就會回的值。
+        return await _gate.RunAsync("Penumbra.CreateTemporaryCollection", () =>
         {
             var collName = "Brio_" + uid;
             _penumbraCreateNamedTemporaryCollection.Invoke("Brio", collName, out var collId);
             Brio.Log.Debug("Creating Temp Collection {collName}, GUID: {collId}", collName, collId);
             return collId;
 
-        }).ConfigureAwait(false);
+        }, Guid.Empty).ConfigureAwait(false);
     }
 
     public async Task SetTemporaryModsAsync(Guid applicationId, Guid collId, Dictionary<string, string> modPaths)
     {
         if(!IsAvailable) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒,所以過閘門;
+        //    卸載期從別的執行緒進來時不執行 body(那時轉派會就地在呼叫端執行緒執行)。
+        await _gate.RunAsync("Penumbra.SetTemporaryMods", () =>
         {
             foreach(var mod in modPaths)
             {
@@ -280,7 +359,9 @@ public class PenumbraService : BrioIPC
     {
         if(!IsAvailable) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 唯一的呼叫端在 MCDFService,整條跑在 Task.Run 與 await 續行上 ⇒ 必然跨執行緒,所以過閘門;
+        //    卸載期從別的執行緒進來時不執行 body(那時轉派會就地在呼叫端執行緒執行)。
+        await _gate.RunAsync("Penumbra.SetManipulationData", () =>
         {
             Brio.Log.Debug("[{applicationId}] Manip: {data}", applicationId, manipulationData);
             var retAdd = _penumbraAddTemporaryMod.Invoke("BrioChara_Meta", collId, [], manipulationData, 0);
@@ -295,8 +376,21 @@ public class PenumbraService : BrioIPC
         var redrawType = RedrawType.Redraw;
         if(afterGPose) redrawType = RedrawType.AfterGPose;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 只抄走位址,不解參:兩個呼叫端都在 await 之後把包裝交進來
+        //    (CharacterHandlerService.Revert 先 await 了最長 3 秒的 RedrawAndWait,
+        //    RevertMCDF 則是 await 過物件表重查),而 IGameObject.Address 是建構當下凍結的。
+        var actorRef = LiveActorRef.FromAddress(_objectTable, gameObject.Address);
+
+        await _gate.RunAsync("Penumbra.RedrawObject", () =>
         {
+            // 🔴 存活檢查:gameObject.ObjectIndex 是解參(原生偏移 0x8C),角色已經離開物件表時
+            //    讀的是已釋放的記憶體,而且讀到的垃圾索引會讓 Penumbra 去重繪別人。
+            if(actorRef.IsAlive == false)
+            {
+                Brio.Log.Information("角色已經不在物件表裡,略過 Penumbra 重繪。");
+                return;
+            }
+
             _penumbraRedraw!.Invoke(gameObject.ObjectIndex, setting: redrawType);
         });
     }

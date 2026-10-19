@@ -488,7 +488,7 @@ public class PosingOverlayToolbarWindow : Window
                         ImGui.OpenPopup("overlay_bone_ik");
                 }
             }
-            ImBrio.AttachToolTip("Inverse Kinematics");
+            ImBrio.AttachToolTip("Inverse Kinematics" + ImBrio.TooltipSeparator + IKService.TcWarning);
 
             ImGui.SameLine();
 

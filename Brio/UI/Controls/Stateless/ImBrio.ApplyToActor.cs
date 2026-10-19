@@ -6,6 +6,7 @@ using Brio.Game.Actor.Extensions;
 using Brio.Game.Core;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
+using Dalamud.Plugin.Services;
 using System;
 
 namespace Brio.UI.Controls.Stateless;
@@ -45,8 +46,12 @@ public partial class ImBrio
         {
             using var _ = ImRaii.Disabled(true);
             ImGui.Button("Unable to Spawn");
-        }
 
+            // 🔴 這個 return 不能少:服務拿不到時只畫一個停用的按鈕就結束,否則會照樣往下畫
+            //    「Spawn As New Actor」並在按下去時用 null 的 spawnService 呼叫 CreateCharacter
+            //    ⇒ NullReferenceException。
+            return;
+        }
 
         if(ImGui.Button("Spawn As New Actor"))
         {
@@ -56,7 +61,24 @@ public partial class ImBrio
                 return;
             }
 
-            unsafe bool IsReadyToDraw() => character.Native()->IsReadyToDraw();
+            // 🔴 RunUntilSatisfied 會逐幀重排最多 100 幀,而 character 的 Address 是建構當下凍結的。
+            //    角色在這段期間被銷毀就成了懸空位址,IsReadyToDraw() 會踩到已釋放的記憶體
+            //    —— AccessViolationException 在 .NET Core 是 corrupted-state exception,try/catch 攔不到。
+            //    抄走索引 + 位址,每一幀由物件表重查(GetObjectAddress 只讀指標陣列,不解參)。
+            //    ⚠️ 完成動作裡的 new EntityId(character) 只是把 Address 字串化、不解參,維持原樣。
+            if(!Brio.TryGetService(out IObjectTable objectTable))
+            {
+                Brio.Log.Error("Unable to get the object table");
+                return;
+            }
+
+            var actorRef = new LiveActorRef(objectTable, character);
+
+            unsafe bool IsReadyToDraw()
+            {
+                var native = actorRef.Character;
+                return native != null && native->IsReadyToDraw();
+            }
 
             Brio.Framework.RunUntilSatisfied(
                 IsReadyToDraw,

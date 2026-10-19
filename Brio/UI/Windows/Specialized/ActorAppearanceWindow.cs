@@ -3,6 +3,7 @@ using Brio.Entities;
 using Brio.Entities.Actor;
 using Brio.Game.Actor.Appearance;
 using Brio.Game.Actor.Extensions;
+using Brio.Game.Core;
 using Brio.Game.GPose;
 using Brio.MCDF.Game.Services;
 using Brio.UI.Controls.Editors;
@@ -150,7 +151,7 @@ public class ActorAppearanceWindow : Window, IDisposable
 
         if(shouldSetAppearance)
         {
-            _ = actorAppearance?.SetAppearance(currentAppearance, AppearanceImportOptions.All);
+            actorAppearance?.SetAppearance(currentAppearance, AppearanceImportOptions.All).Observe("套用外觀");
         }
     }
 
@@ -169,13 +170,13 @@ public class ActorAppearanceWindow : Window, IDisposable
         using(ImRaii.Disabled(!_capability.IsAppearanceOverridden))
         {
             if(ImBrio.Button("Revert", FontAwesomeIcon.RedoAlt, buttonSize, centerTest: true))
-                _ = _capability.ResetAppearance();
+                _capability.ResetAppearance().Observe("重設外觀");
         }
 
         ImGui.SameLine();
 
         if(ImBrio.Button("Redraw", FontAwesomeIcon.PaintBrush, buttonSize, centerTest: true))
-            _ = _capability.Redraw();
+            _capability.Redraw().Observe("重繪角色");
 
         using(ImRaii.Disabled(!_capability.HasPenumbraIntegration && !_capability.HasCustomizePlusIntegration && !_capability.HasGlamourerIntegration))
         {

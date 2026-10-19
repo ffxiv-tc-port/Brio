@@ -39,6 +39,12 @@ public class GlamourerService : BrioIPC
     private readonly IDalamudPluginInterface _pluginInterface;
     private readonly ActorRedrawService _redrawService;
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// ⇒ 轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
     private readonly ICommandManager _commandManager;
     private readonly IObjectTable _gameObjects;
     private readonly DalamudService _dalamudService;
@@ -71,6 +77,7 @@ public class GlamourerService : BrioIPC
         _pluginInterface = pluginInterface;
         _configurationService = configurationService;
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
         _redrawService = redrawService;
         _commandManager = commandManager;
         _dalamudService = dalamudService;
@@ -191,7 +198,11 @@ public class GlamourerService : BrioIPC
     {
         if((!IsAvailable) || _dalamudService.IsZoning) return;
 
-        await _framework.RunOnFrameworkThread(() =>
+        // 🔴 這支是 public 的非同步包裝,呼叫端會從別的執行緒進來。
+        //    RevertByName 會打 Glamourer 的 IPC 端點 —— 提供端的碼跑在呼叫端的執行緒上,
+        //    而它在那裡動的是遊戲角色的外觀狀態。閘門在已經是框架執行緒時就地執行、行為不變;
+        //    卸載期不執行 body(那時 RunOnFrameworkThread 會就地在呼叫端執行緒執行委派,轉派完全失效)。
+        await _gate.RunAsync("Glamourer.RevertByName", () =>
         {
             RevertByName(name, applicationId);
 
@@ -213,9 +224,12 @@ public class GlamourerService : BrioIPC
         }
     }
 
+    /// <summary>
+    /// 透過角色名字還原 Glamourer 狀態並解鎖。
+    /// </summary>
     public void RevertByName(string name, Guid applicationId)
     {
-        if((IsAvailable) || _dalamudService.IsZoning) return;
+        if((!IsAvailable) || _dalamudService.IsZoning) return;
 
         try
         {
@@ -236,15 +250,22 @@ public class GlamourerService : BrioIPC
 
         try
         {
-            return await _framework.RunOnFrameworkThread(() =>
+            return await _gate.RunAsync("Glamourer.GetCharacterCustomization", () =>
             {
-                var gameObj = _gameObjects.CreateObjectReference(character);
+                // 🔴 character 是呼叫端好幾幀之前讀出來的位址,而 CreateObjectReference 會解參考它去讀 ObjectKind;
+                //    角色已消失的話那就是懸空讀,try/catch 攔不到。
+                //    先由物件表確認位址還在 —— 只讀物件表自己的指標陣列,不解參考任何存下來的位址。
+                var liveAddress = LiveActorRef.FromAddress(_gameObjects, character).Address;
+                if(liveAddress == nint.Zero)
+                    return string.Empty;
+
+                var gameObj = _gameObjects.CreateObjectReference(liveAddress);
                 if(gameObj is ICharacter c)
                 {
                     return _glamourerGetAllCustomization!.Invoke(c.ObjectIndex).Item2 ?? string.Empty;
                 }
                 return string.Empty;
-            }).ConfigureAwait(false);
+            }, string.Empty).ConfigureAwait(false);
         }
         catch
         {
@@ -252,12 +273,25 @@ public class GlamourerService : BrioIPC
         }
     }
 
+    /// <summary>
+    /// 對角色套用 Glamourer 設計。回傳 <c>true</c> 代表 Glamourer 真的接受了這次套用。
+    /// </summary>
     public bool ApplyDesign(Guid design, IGameObject? character)
     {
         if(IsAvailable == false || character is null)
             return false;
 
-        _glamourerApplyDesign.Invoke(design, character!.ObjectIndex);
+        var result = _glamourerApplyDesign.Invoke(design, character.ObjectIndex);
+
+        // 這裡刻意比上游 cycleapple 寬一格:NothingDone 也算成功。
+        // NothingDone 的語意是「呼叫合法,但狀態本來就是這樣所以沒動到東西」,設計其實是生效的;
+        // 把它當失敗會讓 ActorAppearanceCapability.IsDesignOverridden 停在 false,
+        // 使用者之後就再也還原不了這個設計 —— 那個方向的錯比多還原一次嚴重得多。
+        if(result is not GlamourerApiEc.Success and not GlamourerApiEc.NothingDone)
+        {
+            Brio.Log.Information($"Glamourer could not apply design {design} to GameObject {character.ObjectIndex}: {result}");
+            return false;
+        }
 
         return true;
     }

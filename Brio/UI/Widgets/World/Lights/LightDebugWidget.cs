@@ -28,6 +28,10 @@ public class LightDebugWidget(LightDebugCapability capability) : Widget<LightDeb
 
         ImGui.Text("LightRenderObject");
         ImGui.SameLine();
-        Capability.DynamisIPC.DrawPointer((nint)Capability.GameLight.GameLight->LightRenderObject);
+        // 🔴 光源已經沒了就不要解參考它去拿 LightRenderObject(GPose 光源由遊戲釋放,見 Light.IsValid)。
+        if(Capability.GameLight.IsValid)
+            Capability.DynamisIPC.DrawPointer((nint)Capability.GameLight.GameLight->LightRenderObject);
+        else
+            ImGui.TextColored(ImGuiColors.DalamudRed, "GameLight is no longer valid!");
     }
 }

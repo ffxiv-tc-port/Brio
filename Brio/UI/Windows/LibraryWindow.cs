@@ -1,6 +1,7 @@
 ﻿using Brio.Config;
 using Brio.Entities;
 using Brio.Files;
+using Brio.Game.Core;
 using Brio.Game.GPose;
 using Brio.Game.Posing;
 using Brio.Game.Types;
@@ -17,6 +18,7 @@ using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
+using System.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -246,7 +248,12 @@ public class LibraryWindow : Window
         }
     }
 
-    public new void Toggle()
+    /// <summary>
+    /// 開啟資料庫視窗；已經開著就關掉。
+    /// 刻意不叫 <c>Toggle</c>：基底類別 <c>Window</c> 本身就有一個 <c>Toggle()</c>， 它不是 virtual，而且只做 <c>IsOpen ^= true</c>。
+    /// 改名之後，走錯的呼叫端在編譯期就會被抓出來。
+    /// </summary>
+    public void ToggleOpen()
     {
         if(IsOpen)
         {
@@ -687,10 +694,7 @@ public class LibraryWindow : Window
                             ReScan();
                         }
 
-                        if(ImGui.IsItemHovered())
-                        {
-                            ImGui.SetTooltip("Scan all library sources and refresh the view");
-                        }
+                        ImBrio.SetItemTooltip("Scan all library sources and refresh the view");
                     }
                 }
             }
@@ -1141,7 +1145,10 @@ public class LibraryWindow : Window
         }
     }
 
-    public async void ReScan()
+    // 刻意不是 async void:那種寫法的未處理例外不會進任何 Task,而是直接變成行程層級的未處理例外。
+    public void ReScan() => ReScanAsync().Observe("資料庫重新掃描");
+
+    private async Task ReScanAsync()
     {
         _isRescanning = true;
 

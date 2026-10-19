@@ -16,7 +16,7 @@ namespace Brio.Game.Posing;
 public unsafe class ModelTransformService : IDisposable
 {
     public delegate void SetPositionDelegate(StructsGameObject* gameObject, float x, float y, float z);
-    private readonly Hook<SetPositionDelegate> _setPositionHook = null!;
+    private readonly Hook<SetPositionDelegate>? _setPositionHook;
 
     private readonly EntityManager _entityManager;
     private readonly GPoseService _gPoseService;
@@ -28,8 +28,12 @@ public unsafe class ModelTransformService : IDisposable
         _gPoseService = gPoseService;
         _actorRedrawService = actorRedrawService;
 
-        _setPositionHook = hooking.HookFromAddress<SetPositionDelegate>((nint)StructsGameObject.Addresses.SetPosition.Value, UpdatePositionDetour);
-        _setPositionHook.Enable();
+        // 🔴 CS 解不出 SetPosition 時 .Value 是 0,裸 HookFromAddress(0) 會擲例外;
+        // 而 Brio 的服務是 DI 單例 ⇒ 那等於整個外掛載不起來。
+        var setPositionAddress = (nint)StructsGameObject.Addresses.SetPosition.Value;
+        if(setPositionAddress == nint.Zero)
+            global::Brio.Core.NativeBinding.Fail("模型位移 GameObject::SetPosition", "FFXIVClientStructs 未能在本客戶端解析此位址");
+        _setPositionHook = global::Brio.Core.NativeBinding.CreateHook<SetPositionDelegate>(hooking, setPositionAddress, UpdatePositionDetour, "模型位移 GameObject::SetPosition");
 
         _actorRedrawService.ActorRedrawEvent += OnActorRedraw;
     }
@@ -82,7 +86,9 @@ public unsafe class ModelTransformService : IDisposable
             }
         }
 
-        _setPositionHook.Original(gameObject, x, y, z);
+        // ⚠️ 這個 detour 也會被 OnActorRedraw 直接呼叫(不經 hook),
+        //    所以 hook 沒建立時仍會走到這一行 —— 必須真的判 null,不能只加 !。
+        _setPositionHook?.Original(gameObject, x, y, z);
     }
 
     private void OnActorRedraw(IGameObject go, RedrawStage stage)
@@ -95,7 +101,7 @@ public unsafe class ModelTransformService : IDisposable
 
     public void Dispose()
     {
-        _setPositionHook.Dispose();
+        _setPositionHook?.Dispose();
         _actorRedrawService.ActorRedrawEvent -= OnActorRedraw;
     }
 }

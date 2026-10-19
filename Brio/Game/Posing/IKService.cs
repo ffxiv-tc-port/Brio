@@ -20,11 +20,32 @@ public unsafe class IKService : IDisposable
     private (nint Aligned, nint Unaligned) _ccdConstraintCtrAddr;
     private (nint Aligned, nint Unaligned) _twoJointSetupAddr;
 
+    private static bool _tcWarningLogged;
+
+    /// <summary>
+    /// UI tooltip 與 log 共用的說明(繁中)。
+    /// </summary>
+    public const string TcWarning =
+        "實驗功能:IK 解算是直接呼叫遊戲內建的 havok 解算器。\n" +
+        "三條特徵碼在台服客戶端各自唯一命中,三個結構大小也已逐欄反組譯確認:\n" +
+        "hkaCCDSolver 0x18、CCDIKConstraint 0x20(陣列步進 0x20)、TwoJointIKSetup 0x82。\n" +
+        "仍屬實驗功能:若遊戲出現異常,請關閉 IK 並回報。";
+
+    /// <summary>第一次啟用 IK 時印一次(要使用者回報的診斷,Information 級)。</summary>
+    public static void LogTcWarningOnce()
+    {
+        if(_tcWarningLogged)
+            return;
+        _tcWarningLogged = true;
+
+        Brio.Log.Information("[TC] Brio IK —— " + TcWarning.Replace("\n", " "));
+    }
+
     public IKService(ISigScanner scanner)
     {
-        _ccdSolverCtr = (delegate* unmanaged<hkaCCDSolver*, int, float, void>)scanner.ScanText("E8 ?? ?? ?? ?? 48 8D 43 ?? 48 C7 43");
-        _ccdSolverSolve = (delegate* unmanaged<hkaCCDSolver*, byte*, hkArray<CCDIKConstraint>*, hkaPose*, byte*>)scanner.ScanText("E8 ?? ?? ?? ?? 8B 44 24 ?? 48 8B 5C 24 ?? 48 3B 5C 24");
-        _twoJointSolverSolve = (delegate* unmanaged<byte*, TwoJointIKSetup*, hkaPose*, byte*>)scanner.ScanText("E8 ?? ?? ?? ?? 0F 28 55 ?? 41 0F 28 D8");
+        _ccdSolverCtr = (delegate* unmanaged<hkaCCDSolver*, int, float, void>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 48 8D 43 ?? 48 C7 43", "IK:CCD 解算器建構");
+        _ccdSolverSolve = (delegate* unmanaged<hkaCCDSolver*, byte*, hkArray<CCDIKConstraint>*, hkaPose*, byte*>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 8B 44 24 ?? 48 8B 5C 24 ?? 48 3B 5C 24", "IK:CCD 解算");
+        _twoJointSolverSolve = (delegate* unmanaged<byte*, TwoJointIKSetup*, hkaPose*, byte*>)NativeBinding.Scan(scanner, "E8 ?? ?? ?? ?? 0F 28 55 ?? 41 0F 28 D8", "IK:雙關節解算");
 
         _solverAddr = NativeHelpers.AllocateAlignedMemory(sizeof(hkaCCDSolver), 16);
         _ccdConstraintCtrAddr = NativeHelpers.AllocateAlignedMemory(sizeof(CCDIKConstraint), 16);
@@ -34,8 +55,14 @@ public unsafe class IKService : IDisposable
         *setup = new TwoJointIKSetup();
     }
 
+    /// <summary>三個原生解算器都繫結成功時才可用。任一失效就整個 IK 停用(呼叫 null 函式指標是 AVE)。</summary>
+    public bool IsAvailable => _ccdSolverCtr != null && _ccdSolverSolve != null && _twoJointSolverSolve != null;
+
     public void SolveIK(hkaPose* pose, BoneIKInfo ikInfo, Bone bone, Vector3 target)
     {
+        if(IsAvailable == false)
+            return;
+
         ikInfo.SolverOptions.Switch(
             ccd =>
             {
@@ -70,7 +97,16 @@ public unsafe class IKService : IDisposable
             {
                 var boneList = bone.GetBonesToDepth(twoJoint.FirstBone, true);
 
-                if(boneList.Count < twoJoint.FirstBone)
+                // 🔴 三個索引都要判,而且是 <= 不是 <。
+                // GetBonesToDepth(n) 最多回 n + 1 個,但碰到隱藏的父骨、部分骨骼邊界或根骨會提早停,
+                // 所以 Count == FirstBone 是真的會發生的 —— 而下面直接拿 FirstBone 去索引。
+                // 失敗形式是 ArgumentOutOfRangeException(不是崩潰),表現成那一幀整個姿勢套不上去。
+                if(twoJoint.FirstBone < 0 || twoJoint.SecondBone < 0 || twoJoint.EndBone < 0)
+                    return;
+
+                if(boneList.Count <= twoJoint.FirstBone
+                    || boneList.Count <= twoJoint.SecondBone
+                    || boneList.Count <= twoJoint.EndBone)
                     return;
 
                 TwoJointIKSetup* setup = (TwoJointIKSetup*)_twoJointSetupAddr.Aligned;
@@ -90,6 +126,9 @@ public unsafe class IKService : IDisposable
     {
         NativeHelpers.FreeAlignedMemory(_solverAddr);
         NativeHelpers.FreeAlignedMemory(_ccdConstraintCtrAddr);
+        // 建構子配了三塊,上游只釋放兩塊 —— 少釋放這一塊的話,每次載入/卸載外掛就漏掉
+        // 一份 TwoJointIKSetup 的配置(含對齊補償),而且是永遠拿不回來的原生記憶體。
+        NativeHelpers.FreeAlignedMemory(_twoJointSetupAddr);
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 0x18)]

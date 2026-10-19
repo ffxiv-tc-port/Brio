@@ -163,7 +163,8 @@ public class DynamisService : BrioIPC
                 }
             }
 
-            if(ImGui.IsItemHovered())
+            // 停用時也要出現；ImRaii.Enabled() 會暫時解除外層 ImRaii.Disabled 的停用，說明框因此是全亮的。
+            if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             {
                 using var disabled = ImRaii.Enabled();
                 using var tt = ImRaii.Tooltip();

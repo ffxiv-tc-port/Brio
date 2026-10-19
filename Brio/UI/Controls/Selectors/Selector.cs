@@ -1,4 +1,6 @@
-﻿using Dalamud.Bindings.ImGui;
+﻿using Brio.Game.Core;
+using Brio.UI.Controls.Stateless;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 using System;
 using System.Collections.Generic;
@@ -143,8 +145,11 @@ public abstract class Selector<T> where T : class
                                         if(itemGroup.Success)
                                             DrawItem(item, isSoftSelected);
                                     }
-                                    if(ImGui.IsItemHovered())
+                                    if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                                    {
+                                        using var tooltipAlpha = ImBrio.PushDisabledTooltipAlpha();
                                         DrawTooltip(item);
+                                    }
                                 }
                                 ImGui.SetCursorPos(endPos);
                             }
@@ -215,6 +220,7 @@ public abstract class Selector<T> where T : class
         {
             PopulateList();
         }, TaskScheduler.Default);
+        _taskQueue.Observe("選單清單初始化");
 
         UpdateList();
     }
@@ -241,6 +247,7 @@ public abstract class Selector<T> where T : class
             Interlocked.Exchange(ref _filteredAndSortedItems, newList);
 
         }, TaskScheduler.Default);
+        _taskQueue.Observe("選單清單過濾與排序");
 
     }
 

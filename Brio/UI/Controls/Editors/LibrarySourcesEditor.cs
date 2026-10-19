@@ -80,8 +80,7 @@ public static class LibrarySourcesEditor
                     }
                 }
 
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Remove the selected source");
+                ImBrio.SetItemTooltip("Remove the selected source");
             }
 
             ImGui.SameLine();
@@ -101,8 +100,7 @@ public static class LibrarySourcesEditor
                     }
                 }
 
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Toggle the selected source on or off");
+                ImBrio.SetItemTooltip("Toggle the selected source on or off");
             }
 
             ImGui.SameLine();
@@ -118,8 +116,7 @@ public static class LibrarySourcesEditor
                     ImGui.OpenPopup("###settings_edit_source");
                 }
 
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Edit the selected source");
+                ImBrio.SetItemTooltip("Edit the selected source");
 
             }
         }

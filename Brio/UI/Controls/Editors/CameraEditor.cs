@@ -353,8 +353,7 @@ public static class CameraEditor
             ImGui.Checkbox("Hide Brio On Play  (Press 'Shift + B' to Stop Cutscene)", ref _cutsceneManager.CloseWindowsOnPlay);
 
             ImGui.Checkbox("###delay_Start", ref _cutsceneManager.DelayStart);
-            if(ImGui.IsItemHovered())
-                ImGui.SetTooltip("Start Delay");
+            ImBrio.SetItemTooltip("Start Delay");
 
             ImGui.SameLine();
             ImGui.SetNextItemWidth(MaxItemWidth);
@@ -375,8 +374,7 @@ public static class CameraEditor
             using(ImRaii.Disabled(_cutsceneManager.StartAllActorAnimationsOnPlay == false))
             {
                 ImGui.Checkbox("###animation_delay_Start", ref _cutsceneManager.DelayAnimationStart);
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Animation Start Delay");
+                ImBrio.SetItemTooltip("Animation Start Delay");
 
                 ImGui.SameLine();
                 ImGui.SetNextItemWidth(MaxItemWidth);

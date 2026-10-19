@@ -26,11 +26,27 @@ using System.Threading.Tasks;
 
 namespace Brio.MCDF.Game.Services;
 
+/// <summary>匯出流程用的角色身分。<b>只保存值型別,不保存 IGameObject。</b>重新繫結時<b>兩個條件都要成立</b>,兩者互相補對方的盲點:
+/// ① <c>ObjectIndex</c> + <c>Address</c> 仍在物件表裡(<c>LiveActorRef</c>,只讀物件表自己的指標陣列,不解參考任何存下來的位址)⇒ 記憶體安全;這一條擋不住的是槽位被回收後換人(ABA)。
+/// ② 重查到的物件回報的 <c>GameObjectId</c> 與當初抄下來的相同 ⇒ 身分正確;這一條擋不住的是同一個 id 出現在多個槽位(GPose 複本),那由 ① 擋。
+/// 所以這裡刻意<b>不</b>用 <c>SearchById</c>:它只比 id、回傳第一個命中,而且對 id 為 0 的角色直接回 null。</summary>
+internal readonly record struct McdfExportActor(string Name, ulong GameObjectId, int ObjectIndex, nint Address);
+
+/// <summary>匯出途中角色從物件表消失。用專屬型別讓上層能與「真的出錯」分開處理。</summary>
+internal sealed class McdfExportActorLostException(string message) : Exception(message);
+
 public class MCDFService : IDisposable
 {
     public static readonly IImmutableList<string> AllowedFileExtensions = [".mdl", ".tex", ".mtrl", ".tmb", ".pap", ".avfx", ".atex", ".sklb", ".eid", ".phyb", ".pbd", ".scd", ".skp", ".shpk", ".kdb"];
 
     private readonly IFramework _framework;
+    /// <summary>
+    /// 主執行緒轉派的卸載期閘門。🔴 <c>IFramework.RunOnFrameworkThread</c> 與<b>無延遲的</b>
+    /// <c>RunOnTick</c> 在 <c>IsFrameworkUnloading</c> 為真時會<b>就地在呼叫端執行緒</b>執行委派
+    /// ⇒ 轉派在那一瞬間完全失效。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
+    private readonly IObjectTable _objectTable;
     private readonly TargetService _targetService;
     private readonly ConfigurationService _configurationService;
     private readonly FileCacheService _fileCacheService;
@@ -63,10 +79,12 @@ public class MCDFService : IDisposable
 
     //private int _globalFileCounter = 0;
 
-    public MCDFService(IFramework framework, CharacterHandlerService characterHandlerService, GPoseService gPoseService, ActorAppearanceService actorAppearanceService, ConfigurationService configurationService, FileCacheService fileCacheService, TargetService targetService, ActorRedrawService actorRedrawService, DalamudService dalamudService,
+    public MCDFService(IFramework framework, IObjectTable objectTable, CharacterHandlerService characterHandlerService, GPoseService gPoseService, ActorAppearanceService actorAppearanceService, ConfigurationService configurationService, FileCacheService fileCacheService, TargetService targetService, ActorRedrawService actorRedrawService, DalamudService dalamudService,
         PenumbraService penumbraService, TransientResourceService transientResourceService, GlamourerService glamourerService, CustomizePlusService customizePlusService)
     {
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
+        _objectTable = objectTable;
         _configurationService = configurationService;
         _fileCacheService = fileCacheService;
         _targetService = targetService;
@@ -109,7 +127,16 @@ public class MCDFService : IDisposable
     }
     public async Task SaveMCDF(string path, string description, IGameObject gameObject)
     {
-        UiBlockingComputation = Task.Run(async () => await SaveCharaFileAsync(description, path, gameObject).ConfigureAwait(false));
+        // 在 framework 執行緒上、而且確認過物件還在物件表裡之後才抄身分(CaptureActorAsync 自己會做這兩件事),
+        // 之後整條匯出流程都不再持有這個 IGameObject。
+        var actor = await CaptureActorAsync(gameObject).ConfigureAwait(false);
+        if(actor is null)
+        {
+            Brio.Log.Information("角色已不在物件表裡,取消 MCDF 匯出(階段:抄下匯出目標)。");
+            return;
+        }
+
+        UiBlockingComputation = Task.Run(async () => await SaveCharaFileAsync(description, path, actor.Value).ConfigureAwait(false));
 
         await UiBlockingComputation.ConfigureAwait(false);
     }
@@ -119,7 +146,7 @@ public class MCDFService : IDisposable
         var canApply = _targetService.CanApplyMCDFToTarget();
 
         if(canApply.CanApply)
-            _ = ApplyMCDF(canApply.GameObject);
+            ApplyMCDF(canApply.GameObject).Observe("對 GPose 目標套用 MCDF");
     }
 
     // Load
@@ -130,6 +157,10 @@ public class MCDFService : IDisposable
             return;
 
         var name = gameObject.Name.TextValue;
+
+        // 在這裡(物件確定還新鮮)就把身分抄走。之後整條套用流程有數秒的等待與重繪,
+        // 期間 IObjectTable 的共用包裝可能已經被改寫成別人,再讀 GameObjectId 就是錯的。
+        var gameObjectId = gameObject.GameObjectId;
 
         _currentApplicationCount++;
 
@@ -166,7 +197,7 @@ public class MCDFService : IDisposable
                 DataApplicationProgress = "Applying MCDF data";
                 Brio.Log.Debug($"{DataApplicationProgress}");
 
-                await ApplyDataAsync(applicationId, (name, gameObject), isSelf, charaFile.FilePath,
+                await ApplyDataAsync(applicationId, (name, gameObjectId), isSelf, charaFile.FilePath,
                     extractedFiles, charaFile.CharaFileData.ManipulationData, charaFile.CharaFileData.GlamourerData,
                     charaFile.CharaFileData.CustomizePlusData, CancellationToken.None).ConfigureAwait(false);
             }
@@ -258,68 +289,156 @@ public class MCDFService : IDisposable
         return gamePathToFilePath;
     }
 
-    private async Task ApplyDataAsync(Guid applicationId, (string Name, IGameObject GameObject) tempHandler, bool isSelf, string UID,
+    // 這條路徑從頭到尾有數秒的等待(3 秒 Delay 與兩次 redraw-and-wait),期間目標角色可能離開 GPose 或直接消失。
+    // 所以這裡只帶「名字 + GameObjectId」,不帶 IGameObject:每個 await 回來都用 id 重查一次物件表。
+    // - SearchById 回傳的是 IObjectTable 共用的包裝實例(存取時就地改寫 Address,槽位空掉時連改寫都不做), 不能跨幀留著;因此在同一個 framework 回呼裡就用 CreateObjectReference 轉成獨立實例,只給接下來那一步用。
+    // - 查不到就代表角色已經不在物件表裡 ⇒ 中止套用,走 finally 的既有還原路徑,不留半套狀態。
+    private async Task ApplyDataAsync(Guid applicationId, (string Name, ulong GameObjectId) tempHandler, bool isSelf, string UID,
         Dictionary<string, string> modPaths, string? manipData, string? glamourerData, string? customizeData, CancellationToken token)
     {
         Guid? cPlusId = null;
-        Guid penumbraCollection;
+        Guid? penumbraCollection = null;
+        bool actorLost = false;
+
+        // 以 id 重查目標,並在同一個 framework 回呼裡把物件索引一併讀出來(索引是值,可以安全帶出回呼)。
+        // 回傳的 IGameObject 是 CreateObjectReference 產生的獨立實例:Address 是這一刻凍結的, 不會被物件表的共用包裝改寫成別人 —— 但也只保證「緊接著的這一步」有效,不要跨下一個 await 留著。
+        // 📌 GPose 目標的 id 一律是「索引 | 2<<32」,全表唯一,SearchById「回索引最小的第一個命中」不可能挑到別的角色。
+        async Task<(IGameObject? Actor, int Index)> ResolveActorAsync(string stage)
+        {
+            var resolved = await _framework.RunOnFrameworkThread<(IGameObject? Actor, int Index)>(() =>
+            {
+                if(tempHandler.GameObjectId == 0)
+                    return (null, 0);
+
+                var live = _objectTable.SearchById(tempHandler.GameObjectId);
+                if(live is null || live.Address == nint.Zero)
+                    return (null, 0);
+
+                return (_objectTable.CreateObjectReference(live.Address), (int)live.ObjectIndex);
+            }).ConfigureAwait(false);
+
+            if(resolved.Actor is null)
+                Brio.Log.Information($"角色已消失,取消 MCDF 套用(階段:{stage};角色「{tempHandler.Name}」,GameObjectId 0x{tempHandler.GameObjectId:X})");
+
+            return resolved;
+        }
+
         try
         {
             DataApplicationProgress = "Reverting previous Application";
 
-            await _penumbraService.Redraw(tempHandler.GameObject);
-            await _actorRedrawService.RedrawAndWait(tempHandler.GameObject);
+            var (actor, _) = await ResolveActorAsync("還原先前的套用").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
 
-            _glamourerService.UnlockAndRevertCharacter(tempHandler.GameObject);
+            await _penumbraService.Redraw(actor);
+
+            (actor, _) = await ResolveActorAsync("重繪並等待").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
+
+            await _actorRedrawService.RedrawAndWait(actor);
+
+            (actor, _) = await ResolveActorAsync("還原 Glamourer 與 Customize+").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
+
+            _glamourerService.UnlockAndRevertCharacter(actor);
             _glamourerService.UnlockAndRevertCharacterByName(tempHandler.Name);
 
-            _customizePlusService.RemoveTemporaryProfile(tempHandler.GameObject);
+            _customizePlusService.RemoveTemporaryProfile(actor);
 
             await Task.Delay(TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
 
             DataApplicationProgress = "Applying Penumbra information";
 
-            var idx = await _framework.RunOnFrameworkThread(() => tempHandler.GameObject?.ObjectIndex).ConfigureAwait(false) ?? 0;
+            int idx;
+            (actor, idx) = await ResolveActorAsync("套用 Penumbra 資料").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
+
             Brio.Log.Debug($"{DataApplicationProgress} idx:{idx}");
 
             penumbraCollection = await _penumbraService.CreateTemporaryCollectionAsync($"Brio_{idx}").ConfigureAwait(false);
 
-            await _penumbraService.AssignTemporaryCollectionAsync(penumbraCollection, idx).ConfigureAwait(false);
-            await _penumbraService.SetTemporaryModsAsync(applicationId, penumbraCollection, modPaths).ConfigureAwait(false);
-            await _penumbraService.SetManipulationDataAsync(applicationId, penumbraCollection, manipData ?? string.Empty).ConfigureAwait(false);
+            await _penumbraService.AssignTemporaryCollectionAsync(penumbraCollection.Value, idx).ConfigureAwait(false);
+            await _penumbraService.SetTemporaryModsAsync(applicationId, penumbraCollection.Value, modPaths).ConfigureAwait(false);
+            await _penumbraService.SetManipulationDataAsync(applicationId, penumbraCollection.Value, manipData ?? string.Empty).ConfigureAwait(false);
 
             DataApplicationProgress = "Applying Glamourer and redrawing Character";
             Brio.Log.Debug($"{DataApplicationProgress}");
 
-            _glamourerService.ApplyAllAsync(tempHandler.GameObject, glamourerData, applicationId);
+            (actor, _) = await ResolveActorAsync("套用 Glamourer 並重繪").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
 
-            await _actorRedrawService.RedrawAndWait(tempHandler.GameObject);
+            _glamourerService.ApplyAllAsync(actor, glamourerData, applicationId);
 
-            await _penumbraService.RemoveTemporaryCollectionAsync(applicationId, penumbraCollection).ConfigureAwait(false);
+            await _actorRedrawService.RedrawAndWait(actor);
+
+            await _penumbraService.RemoveTemporaryCollectionAsync(applicationId, penumbraCollection.Value).ConfigureAwait(false);
+            penumbraCollection = null;
 
             DataApplicationProgress = "Applying Customize+ data";
+
+            (actor, _) = await ResolveActorAsync("套用 Customize+ 資料").ConfigureAwait(false);
+            if(actor is null)
+            {
+                actorLost = true;
+                return;
+            }
 
             if(!string.IsNullOrEmpty(customizeData))
             {
                 Brio.Log.Debug($"{DataApplicationProgress}");
-                cPlusId = await _customizePlusService.SetBodyScaleAsync(tempHandler.GameObject, customizeData).ConfigureAwait(false);
+                cPlusId = await _customizePlusService.SetBodyScaleAsync(actor, customizeData).ConfigureAwait(false);
                 //Brio.Log.Warning("LOOK AT ME I' M MR MESEECKS {customizeData}");
                 //Brio.Log.Warning(customizeData);
             }
             else
             {
                 Brio.Log.Debug($"{DataApplicationProgress} IsNullOrEmpty");
-                cPlusId = await _customizePlusService.SetBodyScaleAsync(tempHandler.GameObject, Convert.ToBase64String(Encoding.UTF8.GetBytes("{}"))).ConfigureAwait(false);
+                cPlusId = await _customizePlusService.SetBodyScaleAsync(actor, Convert.ToBase64String(Encoding.UTF8.GetBytes("{}"))).ConfigureAwait(false);
             }
 
-            _characterHandlerService.CharacterHandler.Add(new CharacterHolder(tempHandler.GameObject, cPlusId, tempHandler.Name));
+            _characterHandlerService.CharacterHandler.Add(new CharacterHolder(tempHandler.GameObjectId, cPlusId, tempHandler.Name));
         }
         finally
         {
-            if(token.IsCancellationRequested)
+            if(actorLost || token.IsCancellationRequested)
             {
                 DataApplicationProgress = "Application aborted. Reverting Character...";
-                await _characterHandlerService.RevertMCDF(new CharacterHolder(tempHandler.GameObject, cPlusId, tempHandler.Name)).ConfigureAwait(false);
+
+                // 已建立但還沒收掉的 Penumbra 暫時集合要拆掉,否則會留下孤兒集合(正常路徑上已經移除並設回 null)。
+                if(penumbraCollection.HasValue)
+                {
+                    try
+                    {
+                        await _penumbraService.RemoveTemporaryCollectionAsync(applicationId, penumbraCollection.Value).ConfigureAwait(false);
+                    }
+                    catch(Exception ex)
+                    {
+                        Brio.Log.Warning(ex, "取消 MCDF 套用時移除 Penumbra 暫時集合失敗");
+                    }
+                }
+
+                // 既有的還原路徑:holder 只帶 id,RevertMCDF 自己會重查物件表,查不到時退回以名稱還原 Glamourer。
+                await _characterHandlerService.RevertMCDF(new CharacterHolder(tempHandler.GameObjectId, cPlusId, tempHandler.Name)).ConfigureAwait(false);
             }
 
             DataApplicationProgress = string.Empty;
@@ -327,6 +446,87 @@ public class MCDFService : IDisposable
     }
 
     // Save
+
+    /// <summary>
+    /// 在 framework 執行緒上抄下角色身分。先由物件表確認呼叫端給的包裝還指向表裡的物件,再解參考讀名字與 id;
+    /// 呼叫端拿著的是好幾幀前的包裝時回 <c>null</c>,不會踩到懸空位址。
+    /// </summary>
+    private async Task<McdfExportActor?> CaptureActorAsync(IGameObject? gameObject)
+        => await _gate.RunAsync<McdfExportActor?>("MCDF.CaptureActor", () => CaptureActor(gameObject), null).ConfigureAwait(false);
+
+    private McdfExportActor? CaptureActor(IGameObject? gameObject)
+    {
+        if(gameObject is null)
+            return null;
+
+        // go.Address 只讀包裝自己的欄位、GetObjectAddress 只讀物件表自己的指標陣列,兩者都不解參考。
+        var address = LiveActorRef.FromAddress(_objectTable, gameObject.Address).Address;
+        if(address == nint.Zero)
+            return null;
+
+        // 位址確認還在物件表裡了,這時候解參考才安全。CreateObjectReference 產生的是獨立包裝,
+        // 不會被物件表槽位的共用實例就地改寫。
+        var live = _objectTable.CreateObjectReference(address);
+        if(live is null)
+            return null;
+
+        return new McdfExportActor(live.Name.TextValue, live.GameObjectId, live.ObjectIndex, address);
+    }
+
+    /// <summary>
+    /// 角色現在還在物件表裡、而且還是同一個角色時,回傳一個當場產生的獨立包裝,否則回 <c>null</c>。
+    /// <b>必須在 framework 執行緒上呼叫,而且拿到的包裝只能在同一個呼叫堆疊之內用完,不可以再帶過幀。</b>
+    /// </summary>
+    private IGameObject? ResolveExportActor(McdfExportActor actor)
+    {
+        // 第一關:位址還在物件表裡嗎(不解參考)。
+        var address = new LiveActorRef(_objectTable, actor.ObjectIndex, actor.Address).Address;
+        if(address == nint.Zero)
+            return null;
+
+        var live = _objectTable.CreateObjectReference(address);
+        if(live is null)
+            return null;
+
+        // 第二關:還在的是不是同一個角色(擋槽位被回收之後換人)。此時位址已確認在表裡,解參考是安全的。
+        if(live.GameObjectId != actor.GameObjectId)
+            return null;
+
+        return live;
+    }
+
+    /// <summary>
+    /// 在 framework 執行緒上重查角色,<b>並且在同一個回呼裡就把要用的東西讀完</b>。
+    /// 這樣「確認還活著」與「解參考」之間不會夾一次執行緒切換,不會有中間跨幀的空窗。
+    /// 查不到就擲 <see cref="McdfExportActorLostException"/> 中止整份匯出。
+    /// </summary>
+    private async Task<T> WithLiveActorAsync<T>(McdfExportActor actor, string stage, Func<IGameObject, T> read)
+    {
+        // 卸載期回 (false, ...)，與「角色已經不在」走的是同一條路：擲 McdfExportActorLostException
+        // 中止整份匯出。🔴 不可以回 (true, default)，那會寫出一個內容是空的 MCDF 檔。
+        var result = await _gate.RunAsync<(bool, T)>("MCDF.WithLiveActor", () =>
+        {
+            var live = ResolveExportActor(actor);
+            return live is null ? (false, default(T)!) : (true, read(live));
+        }, (false, default(T)!)).ConfigureAwait(false);
+
+        if(result.Item1 == false)
+            throw new McdfExportActorLostException(ActorLostMessage(actor, stage));
+
+        return result.Item2;
+    }
+
+    private static string ActorLostMessage(McdfExportActor actor, string stage)
+        => $"角色已消失,取消 MCDF 匯出(階段:{stage};角色「{actor.Name}」,物件索引 {actor.ObjectIndex},GameObjectId 0x{actor.GameObjectId:X})";
+
+    private async Task<IGameObject> ResolveExportActorOrThrowAsync(McdfExportActor actor, string stage)
+    {
+        var live = await _gate.RunAsync<IGameObject?>("MCDF.ResolveExportActor", () => ResolveExportActor(actor), null).ConfigureAwait(false);
+        if(live is null)
+            throw new McdfExportActorLostException(ActorLostMessage(actor, stage));
+
+        return live;
+    }
 
     public async Task ExportSelfAsMCDFAsync(string description, string filePath)
     {
@@ -356,13 +556,25 @@ public class MCDFService : IDisposable
 
     internal async Task SaveCharaFileAsync(string description, string filePath, IGameObject gameObject)
     {
+        var actor = await CaptureActorAsync(gameObject).ConfigureAwait(false);
+        if(actor is null)
+        {
+            Brio.Log.Information("角色已不在物件表裡,取消 MCDF 匯出(階段:抄下匯出目標)。");
+            return;
+        }
+
+        await SaveCharaFileAsync(description, filePath, actor.Value).ConfigureAwait(false);
+    }
+
+    private async Task SaveCharaFileAsync(string description, string filePath, McdfExportActor actor)
+    {
         var tempFilePath = filePath + ".tmp";
 
         try
         {
             Brio.Log.Info("Starting MCDF export...");
 
-            var data = await CreatePlayerData(gameObject).ConfigureAwait(false);
+            var data = await CreatePlayerData(actor).ConfigureAwait(false);
             if(data == null) return;
 
             MareCharaFileData mareCharaFileData = new MareCharaFileData(_fileCacheService, "", data);
@@ -408,8 +620,31 @@ public class MCDFService : IDisposable
 
     public async Task<API.Data.CharacterData?> CreatePlayerData(IGameObject gameObject)
     {
+        var actor = await CaptureActorAsync(gameObject).ConfigureAwait(false);
+        if(actor is null)
+        {
+            Brio.Log.Information("角色已不在物件表裡,取消建立 MCDF 資料。");
+            return null;
+        }
+
+        return await CreatePlayerData(actor.Value).ConfigureAwait(false);
+    }
+
+    private async Task<API.Data.CharacterData?> CreatePlayerData(McdfExportActor actor)
+    {
         CharacterDataEX newCdata = new();
-        var fragment = await BuildCharacterData(gameObject, CancellationToken.None).ConfigureAwait(false);
+
+        CharacterDataFragment? fragment;
+        try
+        {
+            fragment = await BuildCharacterData(actor, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch(McdfExportActorLostException ex)
+        {
+            // 角色中途消失:整份匯出中止,連空檔都不要寫出去。
+            Brio.Log.Information(ex.Message);
+            return null;
+        }
 
         newCdata.SetFragment(API.Data.Enum.ObjectKind.Player, fragment);
 
@@ -436,83 +671,109 @@ public class MCDFService : IDisposable
 
     public async Task<CharacterDataFragment?> BuildCharacterData(IGameObject playerRelatedObject, CancellationToken token)
     {
+        var actor = await CaptureActorAsync(playerRelatedObject).ConfigureAwait(false);
+        if(actor is null) return null;
+
+        return await BuildCharacterData(actor.Value, token).ConfigureAwait(false);
+    }
+
+    private async Task<CharacterDataFragment?> BuildCharacterData(McdfExportActor actor, CancellationToken token)
+    {
         if(IsIPCAvailable is false)
         {
             throw new InvalidOperationException("Penumbra or Glamourer is not connected");
         }
 
-        if(playerRelatedObject == null) return null;
-
         bool pointerIsZero = true;
         try
         {
-            pointerIsZero = playerRelatedObject.Address == IntPtr.Zero;
-            try
-            {
-                pointerIsZero = await CheckForNullDrawObject(playerRelatedObject.Address).ConfigureAwait(false);
-            }
-            catch
-            {
-                pointerIsZero = true;
-                Brio.Log.Debug("NullRef for {object}", playerRelatedObject);
-            }
+            pointerIsZero = await CheckForNullDrawObject(actor).ConfigureAwait(false);
         }
         catch(Exception ex)
         {
-            Brio.Log.Warning(ex, "Could not create data for {object}", playerRelatedObject);
+            pointerIsZero = true;
+            Brio.Log.Warning(ex, "Could not create data for {object}", actor.Name);
         }
 
         if(pointerIsZero)
         {
-            Brio.Log.Debug("Pointer was zero for {objectKind}", playerRelatedObject.ObjectKind);
+            Brio.Log.Debug("Pointer was zero for {object}", actor.Name);
             return null;
         }
 
         try
         {
-            return await CreateCharacterData(playerRelatedObject, token).ConfigureAwait(false);
+            return await CreateCharacterData(actor, token).ConfigureAwait(false);
         }
         catch(OperationCanceledException)
         {
-            Brio.Log.Debug("Cancelled creating Character data for {object}", playerRelatedObject);
+            Brio.Log.Debug("Cancelled creating Character data for {object}", actor.Name);
+            throw;
+        }
+        catch(McdfExportActorLostException)
+        {
+            // 🔴 這一條必須排在下面的 catch(Exception) 前面:被吞掉的話上層會以為只是「沒有資料」,
+            //    然後照樣寫出一個空的 MCDF 檔。這裡讓它往上傳,由 CreatePlayerData 中止整份匯出。
             throw;
         }
         catch(Exception e)
         {
-            Brio.Log.Warning(e, "Failed to create {object} data", playerRelatedObject);
+            Brio.Log.Warning(e, "Failed to create {object} data", actor.Name);
         }
 
         return null;
     }
 
-    private async Task<bool> CheckForNullDrawObject(IntPtr playerPointer)
+    private async Task<bool> CheckForNullDrawObject(McdfExportActor actor)
     {
-        return await _framework.RunOnFrameworkThread(() => CheckForNullDrawObjectUnsafe(playerPointer)).ConfigureAwait(false);
-    }
-    private unsafe bool CheckForNullDrawObjectUnsafe(IntPtr playerPointer)
-    {
-        return ((Character*)playerPointer)->GameObject.DrawObject == null;
+        // 卸載期回 true，與唯一呼叫端的 catch 在「讀不到」時設的 pointerIsZero = true 一致。
+        return await _gate.RunAsync("MCDF.CheckForNullDrawObject", () => CheckForNullDrawObjectUnsafe(actor), true).ConfigureAwait(false);
     }
 
-    private async Task<CharacterDataFragment> CreateCharacterData(IGameObject playerRelatedObject, CancellationToken ct)
+    // 不收裸 IntPtr:好幾幀之前從包裝物件讀出來的位址,角色在這段期間消失就是解參考懸空位址
+    // (AccessViolationException 在 .NET Core 攔不到)。
+    // 所以在同一個 framework 回呼裡先由物件表確認位址還在(只讀指標陣列,不解參考),再解參考。
+    private unsafe bool CheckForNullDrawObjectUnsafe(McdfExportActor actor)
     {
-        var objectKind = playerRelatedObject.ObjectKind;
+        var native = new LiveActorRef(_objectTable, actor.ObjectIndex, actor.Address).Character;
+        if(native is null)
+            return true;
+
+        return native->GameObject.DrawObject == null;
+    }
+
+    // 🔴 這條路徑從頭到尾跨越數百幀:WaitForDrawing、最長 10 秒的存在性輪詢,以及 Penumbra / Glamourer /
+    //    Customize+ 的 IPC 往返。所以這裡不留 IGameObject,每個要解參考的地方都重查一次;
+    //    查不到就擲 McdfExportActorLostException,由 CreatePlayerData 接住並中止整份匯出(不寫出空檔)。
+    private async Task<CharacterDataFragment> CreateCharacterData(McdfExportActor actor, CancellationToken ct)
+    {
+        var objectKind = await WithLiveActorAsync(actor, "讀取角色種類", go => go.ObjectKind).ConfigureAwait(false);
         CharacterDataFragment fragment = objectKind == ObjectKind.Player ? new CharacterDataFragmentPlayer() : new();
 
-        Brio.Log.Verbose("Building character data for {obj}", playerRelatedObject);
+        Brio.Log.Verbose("Building character data for {obj}", actor.Name);
 
         // wait until chara is not drawing and present so nothing spontaneously explodes
-        await _actorRedrawService.WaitForDrawing(playerRelatedObject).ConfigureAwait(false);
+        // (WaitForDrawing 只讀包裝物件自己的 Address 欄位,之後每一幀自己向物件表重查,不會解參考過期的位址。)
+        var drawTarget = await ResolveExportActorOrThrowAsync(actor, "等待角色繪製完成").ConfigureAwait(false);
+        await _actorRedrawService.WaitForDrawing(drawTarget).ConfigureAwait(false);
+
+        // 🔴 這個迴圈真的去物件表查(只讀指標陣列,不解參考存下來的位址),不用 IGameObject.IsValid():
+        //    本 pin 的 Dalamud 那支只檢查「有沒有登入」,對已經消失的角色永遠回 true。
         int totalWaitTime = 10000;
-        while(!await _dalamudService.IsObjectPresentAsync(playerRelatedObject).ConfigureAwait(false) && totalWaitTime > 0)
+        while(totalWaitTime > 0)
         {
+            var present = await _gate.RunAsync("MCDF.WaitForActorPresent", () => ResolveExportActor(actor) is not null, false).ConfigureAwait(false);
+            if(present)
+                break;
+
             Brio.Log.Debug("Character is null but it shouldn't be, waiting");
             await Task.Delay(50, ct).ConfigureAwait(false);
             totalWaitTime -= 50;
         }
 
         // Make sure Brio can't MCDF if the actor had a "Mare" actor loaded on it by cheaking for lock from glamourer
-        if(_glamourerService.CheckForLock(playerRelatedObject))
+        // (重查與 CheckForLock 放在同一個 framework 回呼裡:CheckForLock 內部會讀 ObjectIndex,那是解參考。)
+        if(await WithLiveActorAsync(actor, "檢查 Glamourer 鎖定", go => _glamourerService.CheckForLock(go)).ConfigureAwait(false))
         {
             Brio.Log.Information("Unable to apply MCDF, Actor is Locked by Glamourer");
             Brio.NotifyError("Unable to apply MCDF! Actor is Locked! Are you using a sync service?!");
@@ -525,14 +786,17 @@ public class MCDFService : IDisposable
         Dictionary<string, List<ushort>>? boneIndices =
             objectKind != ObjectKind.Player
             ? null
-            : await _framework.RunOnFrameworkThread(() => GetSkeletonBoneIndices(playerRelatedObject)).ConfigureAwait(false);
+            : await WithLiveActorAsync(actor, "讀取骨架骨骼索引", GetSkeletonBoneIndices).ConfigureAwait(false);
 
         DateTime start = DateTime.UtcNow;
 
         // penumbra call, it's currently broken (How is this broken?) (KEN)
         Dictionary<string, HashSet<string>>? resolvedPaths;
 
-        resolvedPaths = (await _penumbraService.GetCharacterData(playerRelatedObject).ConfigureAwait(false));
+        // 物件索引在「確認角色還在物件表裡」的同一個 framework 回呼裡讀出來,再交給 Penumbra ——
+        // 不把 IGameObject 交過去讓 Penumbra 在之後某一幀才去解參考它的 ObjectIndex。
+        var penumbraIndex = await WithLiveActorAsync(actor, "取得 Penumbra 資源路徑", go => go.ObjectIndex).ConfigureAwait(false);
+        resolvedPaths = (await _penumbraService.GetCharacterData(penumbraIndex).ConfigureAwait(false));
         if(resolvedPaths == null) throw new InvalidOperationException("Penumbra returned null data");
 
         ct.ThrowIfCancellationRequested();
@@ -553,7 +817,7 @@ public class MCDFService : IDisposable
 
         ct.ThrowIfCancellationRequested();
 
-        Brio.Log.Verbose("Handling transient update for {obj}", playerRelatedObject);
+        Brio.Log.Verbose("Handling transient update for {obj}", actor.Name);
 
         // remove all potentially gathered paths from the transient resource manager that are resolved through static resolving
         _transientResourceService.ClearTransientPaths(API.Data.Enum.ObjectKind.Player, fragment.FileReplacements.SelectMany(c => c.GamePaths).ToList());
@@ -581,8 +845,14 @@ public class MCDFService : IDisposable
         //Task<string> getHeelsOffset = _ipcManager.Heels.GetOffsetAsync();
         //Task<string> getHonorificTitle = _ipcManager.Honorific.GetTitle();
 
-        Task<string> getGlamourerData = _glamourerService.GetCharacterCustomizationAsync(playerRelatedObject.Address);
-        Task<string?> getCustomizeData = _customizePlusService.GetScaleAsync(playerRelatedObject);
+        // GetCharacterCustomizationAsync 收的是位址,它自己會在 framework 執行緒上先向物件表確認再解參考,
+        // 所以這裡把當初抄下來的位址交過去就行(見 GlamourerService)。
+        Task<string> getGlamourerData = _glamourerService.GetCharacterCustomizationAsync(actor.Address);
+
+        // ⚠️ Customize+ 這一支內部自己會切到 framework 執行緒才解參考,沒有辦法從外面把「重查」塞進它那個回呼裡,
+        //    所以這裡仍然有一次切換的空窗;交過去的是當場重查出來的獨立包裝。
+        var customizeTarget = await ResolveExportActorOrThrowAsync(actor, "取得 Customize+ 縮放").ConfigureAwait(false);
+        Task<string?> getCustomizeData = _customizePlusService.GetScaleAsync(customizeTarget);
         
         fragment.GlamourerString = await getGlamourerData.ConfigureAwait(false);
         Brio.Log.Verbose("Glamourer is now: {data}", fragment.GlamourerString);
@@ -665,7 +935,7 @@ public class MCDFService : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var skeletonIndices = await _framework.RunOnFrameworkThread(() => GetBoneIndicesFromPap(file.Hash)).ConfigureAwait(false);
+            var skeletonIndices = await _gate.RunAsync<Dictionary<string, List<ushort>>?>("MCDF.GetBoneIndicesFromPap", () => GetBoneIndicesFromPap(file.Hash), null).ConfigureAwait(false);
             bool validationFailed = false;
             if(skeletonIndices != null)
             {
@@ -759,10 +1029,19 @@ public class MCDFService : IDisposable
         return pathsToResolve;
     }
 
+    // 🔴 這支是 public 的,呼叫端可能拿著好幾幀之前建構的包裝(IGameObject 的 Address 是建構當下凍結的)。
+    //    handler.Address 只讀包裝自己的欄位、GetObjectAddress 只讀物件表自己的指標陣列,兩者都不解參考,
+    //    所以先做這個確認永遠安全;確認過之後拿到的指標只能在這個呼叫堆疊之內用完。
     public unsafe Dictionary<string, List<ushort>>? GetSkeletonBoneIndices(IGameObject handler)
     {
-        if(handler.Address == nint.Zero) return null;
-        var chara = (CharacterBase*)(((Character*)handler.Address)->GameObject.DrawObject);
+        var native = LiveActorRef.FromAddress(_objectTable, handler.Address).Character;
+        if(native is null) return null;
+
+        // DrawObject 為 null 時直接呼叫 GetModelType() 就是對 null 解參考。
+        var drawObject = native->GameObject.DrawObject;
+        if(drawObject is null) return null;
+
+        var chara = (CharacterBase*)drawObject;
         if(chara->GetModelType() != CharacterBase.ModelType.Human) return null;
         var resHandles = chara->Skeleton->SkeletonResourceHandles;
         Dictionary<string, List<ushort>> outputIndices = [];

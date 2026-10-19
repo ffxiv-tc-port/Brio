@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Dalamud.Game;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Hooking;
@@ -37,14 +38,14 @@ public unsafe class GPoseService : IDisposable
 
     private delegate bool GPoseEnterExitDelegate(UIModule* uiModule);
     private delegate void ExitGPoseDelegate(UIModule* uiModule);
-    private readonly Hook<GPoseEnterExitDelegate> _enterGPoseHook;
-    private readonly Hook<ExitGPoseDelegate> _exitGPoseHook;
+    private readonly Hook<GPoseEnterExitDelegate>? _enterGPoseHook;
+    private readonly Hook<ExitGPoseDelegate>? _exitGPoseHook;
 
     private delegate nint MouseHoverDelegate(nint a1, nint a2, nint a3);
-    private readonly Hook<MouseHoverDelegate> _mouseHoverHook = null!;
+    private readonly Hook<MouseHoverDelegate>? _mouseHoverHook;
 
     internal delegate void TargetNameDelegate(nint args);
-    internal static Hook<TargetNameDelegate> _targetNameDelegateHook = null!;
+    internal static Hook<TargetNameDelegate>? _targetNameDelegateHook;
 
     private readonly IFramework _framework;
     private readonly IClientState _clientState;
@@ -60,21 +61,29 @@ public unsafe class GPoseService : IDisposable
 
         _isInGPose = _clientState.IsGPosing;
 
-        UIModule* uiModule = Framework.Instance()->UIModule;
-        var enterGPoseAddress = (nint)uiModule->VirtualTable->EnterGPose;
-        var exitGPoseAddress = (nint)uiModule->VirtualTable->ExitGPose;
+        // 🔴 Framework/UIModule/虛擬表任一為 null 時解參考就是 AccessViolation(try/catch 攔不到)。
+        nint enterGPoseAddress = nint.Zero;
+        nint exitGPoseAddress = nint.Zero;
+        var nativeFramework = Framework.Instance();
+        UIModule* uiModule = nativeFramework == null ? null : nativeFramework->UIModule;
+        if(uiModule == null || uiModule->VirtualTable == null)
+        {
+            NativeBinding.Fail("GPose 進出偵測 EnterGPose/ExitGPose", "UIModule 或其虛擬表在載入時尚未建立");
+        }
+        else
+        {
+            enterGPoseAddress = (nint)uiModule->VirtualTable->EnterGPose;
+            exitGPoseAddress = (nint)uiModule->VirtualTable->ExitGPose;
+        }
 
-        _enterGPoseHook = interopProvider.HookFromAddress<GPoseEnterExitDelegate>(enterGPoseAddress, EnteringGPoseDetour);
-        _enterGPoseHook.Enable();
-
-        _exitGPoseHook = interopProvider.HookFromAddress<ExitGPoseDelegate>(exitGPoseAddress, ExitingGPoseDetour);
-        _exitGPoseHook.Enable();
+        _enterGPoseHook = NativeBinding.CreateHook<GPoseEnterExitDelegate>(interopProvider, enterGPoseAddress, EnteringGPoseDetour, "GPose 進入 EnterGPose");
+        _exitGPoseHook = NativeBinding.CreateHook<ExitGPoseDelegate>(interopProvider, exitGPoseAddress, ExitingGPoseDetour, "GPose 離開 ExitGPose");
 
         var mouseHoverAddr = "40 57 48 83 EC ?? 48 89 5C 24 ?? 48 8B F9 48 89 6C 24 ?? 48 89 74 24 ?? 49 8B F0";
-        _mouseHoverHook = interopProvider.HookFromAddress<MouseHoverDelegate>(scanner.ScanText(mouseHoverAddr), GPoseMouseEventDetour);
+        _mouseHoverHook = NativeBinding.ScanHook<MouseHoverDelegate>(scanner, interopProvider, mouseHoverAddr, GPoseMouseEventDetour, "GPose 滑鼠選取 MouseHover", enable: false);
 
         var targetNameAddr = "E8 ?? ?? ?? ?? 48 8D 8D ?? ?? ?? ?? 48 83 C4 28"; // sig from, Ktisis GuiHooks.cs line 43 (https://github.com/ktisis-tools/Ktisis/blob/main/Ktisis/Interop/Hooks/GuiHooks.cs)
-        _targetNameDelegateHook = interopProvider.HookFromAddress<TargetNameDelegate>(scanner.ScanText(targetNameAddr), TargetNameDetour);
+        _targetNameDelegateHook = NativeBinding.ScanHook<TargetNameDelegate>(scanner, interopProvider, targetNameAddr, TargetNameDetour, "GPose 目標名稱 TargetName", enable: false);
 
         _framework.Update += OnFrameworkUpdate;
 
@@ -91,7 +100,7 @@ public unsafe class GPoseService : IDisposable
             }
         }
 
-        _targetNameDelegateHook.Original(args);
+        _targetNameDelegateHook!.Original(args);
     }
 
     public void TriggerGPoseChange()
@@ -118,13 +127,13 @@ public unsafe class GPoseService : IDisposable
 
     private void ExitingGPoseDetour(UIModule* uiModule)
     {
-        _exitGPoseHook.Original.Invoke(uiModule);
+        _exitGPoseHook!.Original.Invoke(uiModule);
         HandleGPoseStateChange(false);
     }
 
     private bool EnteringGPoseDetour(UIModule* uiModule)
     {
-        bool didEnter = _enterGPoseHook.Original.Invoke(uiModule);
+        bool didEnter = _enterGPoseHook!.Original.Invoke(uiModule);
 
         HandleGPoseStateChange(didEnter);
 
@@ -136,7 +145,7 @@ public unsafe class GPoseService : IDisposable
         if(_configService.Configuration.Posing.DisableGPoseMouseSelect)
             return 0;
 
-        return _mouseHoverHook.Original(a1, a2, a3);
+        return _mouseHoverHook!.Original(a1, a2, a3);
     }
 
     private void OnFrameworkUpdate(IFramework framework)
@@ -162,18 +171,18 @@ public unsafe class GPoseService : IDisposable
     {
         if(IsGPosing)
         {
-            if(!_mouseHoverHook.IsEnabled)
+            if(_mouseHoverHook is not null && !_mouseHoverHook.IsEnabled)
                 _mouseHoverHook.Enable();
 
-            _targetNameDelegateHook.Enable();
+            _targetNameDelegateHook?.Enable();
 
         }
         else
         {
-            if(_mouseHoverHook.IsEnabled)
+            if(_mouseHoverHook is not null && _mouseHoverHook.IsEnabled)
                 _mouseHoverHook.Disable();
 
-            _targetNameDelegateHook.Disable();
+            _targetNameDelegateHook?.Disable();
         }
     }
 
@@ -181,10 +190,10 @@ public unsafe class GPoseService : IDisposable
     {
         _framework.Update -= OnFrameworkUpdate;
 
-        _targetNameDelegateHook.Dispose();
-        _enterGPoseHook.Dispose();
-        _exitGPoseHook.Dispose();
-        _mouseHoverHook.Dispose();
+        _targetNameDelegateHook?.Dispose();
+        _enterGPoseHook?.Dispose();
+        _exitGPoseHook?.Dispose();
+        _mouseHoverHook?.Dispose();
 
         GC.SuppressFinalize(this);
     }

@@ -78,16 +78,29 @@ public class ComponentSet<T> : IEnumerable<T>, IDisposable
 
     public void ReplaceItem(int address, T item)
     {
+        // 🔴 界外時必須真的停手,不能只印 Log.Fatal:
+        //    address >= NextAvailableIndex 時會把元件寫進一個從沒配過的槽位 ——
+        //    GetEnumerator 只走到 NextAvailableIndex,那格永遠列舉不到,也永遠不會被回收。
         if(address < 0 || address >= NextAvailableIndex)
+        {
             Brio.Log.Fatal($"(ComponentSet::ReplaceItem) [{address}] Address is out of range.");
+            return;
+        }
 
         Components[address] = item;
     }
 
     public void Remove(int address)
     {
+        // 🔴 界外時必須真的停手,不能只印 Log.Fatal:AvailableIndices.Enqueue(address) 會把一個從沒配過的號碼塞進空號佇列,
+        // 之後 Add 會拿到它,寫進去的元件位在 NextAvailableIndex 之外 ⇒ 列舉不到;
+        // 對它再 Remove 一次又會重複入列 ⇒ 兩次 Add 拿到同一格,後者覆蓋前者。
+        // (address < 0 與正號一致:記錄 Fatal 後不動任何狀態。)
         if(address < 0 || address >= NextAvailableIndex)
+        {
             Brio.Log.Fatal($"(ComponentSet::Remove) [{address}] Address is out of range.");
+            return;
+        }
 
         Components[address] = default!;
         AvailableIndices.Enqueue(address);

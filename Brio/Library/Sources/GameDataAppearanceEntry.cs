@@ -2,6 +2,7 @@
 using Brio.Entities;
 using Brio.Entities.Actor;
 using Brio.Game.Actor.Appearance;
+using Brio.Game.Core;
 using Brio.Game.Types;
 using Brio.Resources;
 using Brio.UI;
@@ -115,7 +116,7 @@ public class GameDataAppearanceEntry : ItemEntryBase
     {
         if(actorEntity.TryGetCapability<ActorAppearanceCapability>(out var capability) && capability != null)
         {
-            _ = capability.SetAppearance(Appearance, AppearanceImportOptions.All);
+            capability.SetAppearance(Appearance, AppearanceImportOptions.All).Observe("從資料庫套用遊戲內建外觀");
         }
     }
 

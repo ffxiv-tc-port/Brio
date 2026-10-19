@@ -4,6 +4,7 @@ using Brio.Entities.Actor;
 using Brio.Game.Actor.Extensions;
 using Brio.Game.Posing;
 using Brio.Game.Types;
+using Brio.IPC;
 using Brio.UI.Widgets.Actor;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
@@ -12,6 +13,7 @@ using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using static Brio.Game.Actor.ActionTimelineService;
 
 namespace Brio.Capabilities.Actor;
@@ -19,6 +21,12 @@ namespace Brio.Capabilities.Actor;
 public class ActionTimelineCapability : ActorCharacterCapability
 {
     private readonly IFramework _framework;
+
+    /// <summary>
+    /// 主執行緒閘門。🔴 <see cref="StopSpeedAndResetTimeline"/> 在 <c>await</c> 之後才 Invoke
+    /// 呼叫端交進來的 <c>postStopAction</c>,而 <c>await</c> 的續行在執行緒池上。
+    /// </summary>
+    private readonly IpcFrameworkGate _gate;
 
     public unsafe float SpeedMultiplier => SpeedMultiplierOverride ?? Character.Native()->Timeline.OverallSpeed;
     public bool HasSpeedMultiplierOverride => SpeedMultiplierOverride.HasValue;
@@ -44,6 +52,7 @@ public class ActionTimelineCapability : ActorCharacterCapability
     public ActionTimelineCapability(IFramework framework, ActorEntity parent, EntityManager entityManager, PhysicsService physicsService, ConfigurationService configService) : base(parent)
     {
         _framework = framework;
+        _gate = new IpcFrameworkGate(framework);
 
         Widget = new ActionTimelineWidget(this, entityManager, physicsService, configService);
     }
@@ -109,6 +118,25 @@ public class ActionTimelineCapability : ActorCharacterCapability
 
     public async void StopSpeedAndResetTimeline(Action? postStopAction = null, bool resetSpeedAfterAction = false)
     {
+        // 🔴 這支是 async void:未處理的例外不會進任何 Task,而是變成行程層級的未處理例外。
+        // 而下面 await 的是<帶延遲>的 RunOnTick —— Dalamud 在卸載期對帶延遲的 RunOnTick 回的是 Task.FromCanceled,await 它就擲 TaskCanceledException。
+        // 🔑 這裡只吞「取消」這一種流程控制,別的例外原樣往外拋。
+        try
+        {
+            await StopSpeedAndResetTimelineCore(postStopAction, resetSpeedAfterAction);
+        }
+        catch(OperationCanceledException)
+        {
+            Brio.Log.Information("StopSpeedAndResetTimeline 在 Dalamud 卸載期被取消,動畫時間軸與速度未還原(遊戲正在關閉)。");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="StopSpeedAndResetTimeline"/> 的本體。抽成 async Task 是為了讓外層的 async void
+    /// 能把卸載期的取消攔下來。
+    /// </summary>
+    private async Task StopSpeedAndResetTimelineCore(Action? postStopAction, bool resetSpeedAfterAction)
+    {
         Brio.Log.Verbose($"StopSpeedAndResetTimeline {postStopAction is not null} {resetSpeedAfterAction}");
 
         var oldSpeed = SpeedMultiplier;
@@ -121,6 +149,14 @@ public class ActionTimelineCapability : ActorCharacterCapability
         {
             unsafe
             {
+                // 🔴 這段是 4 幀之後才跑的。Character(= ActorEntity.GameObject)的 Address 是建構當下
+                //    凍結的,角色若已經消失就是懸空位址,Character.Native() 之後的每一次解參都會踩到
+                //    已釋放的記憶體 —— AccessViolationException 在 .NET Core 是 corrupted-state
+                //    exception,try/catch 攔不到,只能事前擋。IsGameObjectAlive 只讀物件表自己的指標
+                //    陣列(GetObjectAddress),不解參任何存下來的位址,是安全的存活檢查。
+                if(Actor.IsGameObjectAlive == false)
+                    return;
+
                 var drawObj = Character.Native()->GameObject.DrawObject;
                 if(drawObj == null)
                     return;
@@ -165,7 +201,23 @@ public class ActionTimelineCapability : ActorCharacterCapability
             }
         }, delayTicks: 4);
 
-        postStopAction?.Invoke();
+        // 🔴 上面那個 await 的續行在執行緒池上,不在遊戲主執行緒上。
+        // 📌 閘門是 await 的,所以與後面 resetSpeedAfterAction 那一段的先後順序不變。
+        await _gate.RunAsync("ActionTimelineCapability.postStopAction", () =>
+        {
+            // 🔴 存活檢查:上面那個 delayTicks: 4 已經跨了 4 幀以上,角色可能已經離開物件表。
+            //    唯一真的會傳 postStopAction 的呼叫端(PosingCapability.ImportPose 包的
+            //    ImportPose_Internal)整條路徑都在解 Character 的原生指標,而那個位址是建構
+            //    當下凍結的 —— 角色消失之後就是已釋放的記憶體,回到框架執行緒防不了。
+            //    (ImportPose_Internal 自己開頭也有同一個閘門;這裡擋的是所有 postStopAction。)
+            if(Actor.IsGameObjectAlive == false)
+            {
+                Brio.Log.Information("角色在等待動畫停止期間消失,略過後續動作(姿勢套用)。");
+                return;
+            }
+
+            postStopAction?.Invoke();
+        });
 
         Brio.Log.Verbose($"postStopAction Invoke: {postStopAction is not null}");
 
@@ -173,6 +225,10 @@ public class ActionTimelineCapability : ActorCharacterCapability
         {
             await _framework.RunOnTick(() =>
             {
+                // 同上:又過了 2 幀,SetOverallSpeedOverride 與 SpeedMultiplier 都會解參 Character.Native()。
+                if(Actor.IsGameObjectAlive == false)
+                    return;
+
                 SetOverallSpeedOverride(oldSpeed);
 
                 Brio.Log.Verbose($"SetOverallSpeedOverride {SpeedMultiplier}");

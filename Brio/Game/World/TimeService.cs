@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.Core;
 using Brio.Game.GPose;
 using Dalamud.Game;
 using Dalamud.Hooking;
@@ -12,9 +13,11 @@ public class TimeService : IDisposable
 {
     public bool IsTimeFrozen
     {
-        get => _updateEorzeaTimeHook.IsEnabled;
+        get => _updateEorzeaTimeHook?.IsEnabled == true;
         set
         {
+            if(_updateEorzeaTimeHook is null)
+                return;
 
             if(value != IsTimeFrozen)
             {
@@ -83,7 +86,7 @@ public class TimeService : IDisposable
     }
 
     private delegate void UpdateEorzeaTimeDelegate(IntPtr a1, IntPtr a2);
-    private readonly Hook<UpdateEorzeaTimeDelegate> _updateEorzeaTimeHook = null!;
+    private readonly Hook<UpdateEorzeaTimeDelegate>? _updateEorzeaTimeHook;
 
     private readonly IClientState _clientState;
     private readonly GPoseService _gPoseService;
@@ -95,8 +98,14 @@ public class TimeService : IDisposable
         _gPoseService = gPoseService;
         _configurationService = configurationService;
 
-        var etAddress = scanner.ScanText("48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 48 8B DA 48 81 C1 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C");
-        _updateEorzeaTimeHook = hooking.HookFromAddress<UpdateEorzeaTimeDelegate>(etAddress, UpdateEorzeaTime);
+        // ⚠️ 台服上這條特徵碼有 2 個命中,兩支函式的指令序列逐位元組相同(呼叫的下游也是同一批),
+        //    離線無法分辨哪一支才是艾歐澤亞時間更新。取第一個 —— 取錯的後果是「凍結時間沒作用」,
+        //    不會崩(detour 本身什麼都不做,委派簽章對兩支都成立)。
+        var eorzeaTimeAddress = NativeBinding.ScanAmbiguous(scanner,
+            "48 89 5C 24 ?? 57 48 83 EC ?? 48 8B F9 48 8B DA 48 81 C1 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C",
+            "凍結艾歐澤亞時間 UpdateEorzeaTime", offlineHitCount: 2);
+        _updateEorzeaTimeHook = NativeBinding.CreateHook<UpdateEorzeaTimeDelegate>(hooking, eorzeaTimeAddress,
+            UpdateEorzeaTime, "凍結艾歐澤亞時間 UpdateEorzeaTime", enable: false);
 
         _clientState.TerritoryChanged += OnTerritoryChanged;
         _gPoseService.OnGPoseStateChange += OnGPoseStateChanged;

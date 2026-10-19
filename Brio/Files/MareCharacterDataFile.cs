@@ -2,6 +2,7 @@
 using Brio.Config;
 using Brio.Entities;
 using Brio.Entities.Actor;
+using Brio.Game.Core;
 using Brio.Library.Sources;
 using Brio.Library.Tags;
 using Brio.Resources;
@@ -28,7 +29,7 @@ public class MareCharacterDataFileInfo : AppliableActorFileInfoBase<MareCharacte
         ActorAppearanceCapability? capability;
         if(actor.TryGetCapability<ActorAppearanceCapability>(out capability) && capability != null)
         {
-            _ = capability.LoadMCDF(file.GetPath());
+            capability.LoadMCDF(file.GetPath()).Observe("從資料庫載入 MCDF");
         }
     }
 }

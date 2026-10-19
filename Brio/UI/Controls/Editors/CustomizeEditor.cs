@@ -1,5 +1,6 @@
 ﻿using Brio.Capabilities.Actor;
 using Brio.Game.Actor.Appearance;
+using Brio.Game.Core;
 using Brio.Resources;
 using Brio.Resources.Sheets;
 using Brio.UI.Controls.Stateless;
@@ -55,7 +56,7 @@ public class CustomizeEditor()
                 else
                 {
                     if(ImGui.Button("Make Human"))
-                        _ = _capability.MakeHuman();
+                        _capability.MakeHuman().Observe("套用預設人類外觀");
                 }
             }
         }
@@ -356,8 +357,7 @@ public class CustomizeEditor()
                     customize.HighlightsEnabled = highlightEnabled;
                     madeChange |= true;
                 }
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Enable Hair Highlights");
+                ImBrio.SetItemTooltip("Enable Hair Highlights");
 
             }
         }
@@ -388,8 +388,7 @@ public class CustomizeEditor()
             customize.RealEyeShape = (byte)eyeShape;
             madeChange |= true;
         }
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Eye Shape");
+        ImBrio.SetItemTooltip("Eye Shape");
 
         ImGui.SameLine();
 
@@ -407,8 +406,7 @@ public class CustomizeEditor()
             customize.HasSmallIris = smallIris;
             madeChange |= true;
         }
-        if(ImGui.IsItemHovered())
-            ImGui.SetTooltip("Small Iris");
+        ImBrio.SetItemTooltip("Small Iris");
 
         ImGui.SameLine();
         ImGui.SetCursorPosX(LabelStart);
@@ -449,8 +447,7 @@ public class CustomizeEditor()
                 madeChange |= true;
             }
 
-            if(ImGui.IsItemHovered())
-                ImGui.SetTooltip("Enable Lip Color");
+            ImBrio.SetItemTooltip("Enable Lip Color");
 
             ImGui.SameLine();
 
@@ -522,8 +519,7 @@ public class CustomizeEditor()
                     customize.FacepaintFlipped = facepaintFlipped;
                     madeChange |= true;
                 }
-                if(ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Flipped");
+                ImBrio.SetItemTooltip("Flipped");
             }
         }
 

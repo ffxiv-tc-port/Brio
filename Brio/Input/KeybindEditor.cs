@@ -1,4 +1,5 @@
 ﻿using Brio.Config;
+using Brio.UI.Controls.Stateless;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Interface.Utility.Raii;
@@ -67,6 +68,8 @@ public static class KeybindEditor
 
             if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             {
+                // 還在上面的 ImRaii.Disabled 區段內，不把 Alpha 推回 1 說明框會跟著變淡。
+                using var tooltipAlpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, 1f);
                 ImGui.SetTooltip("Control");
             }
         }
@@ -84,6 +87,7 @@ public static class KeybindEditor
 
             if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             {
+                using var tooltipAlpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, 1f);
                 ImGui.SetTooltip("Alt");
             }
         }
@@ -101,6 +105,7 @@ public static class KeybindEditor
 
             if(ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             {
+                using var tooltipAlpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, 1f);
                 ImGui.SetTooltip("Shift");
             }
         }
@@ -113,10 +118,7 @@ public static class KeybindEditor
             changed = true;
         }
 
-        if(ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Reset Key to Default");
-        }
+        ImBrio.SetItemTooltip("Reset Key to Default");
 
         // Key
         ImGui.SameLine();
