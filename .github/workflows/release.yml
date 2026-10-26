@@ -81,3 +81,4 @@ jobs:
 # 🔴 路徑對齊本機實測的 `->` 行：Brio/bin/Release/（bin/x64 不存在，那是 sln 建置才有的）。
 # ⚠️ 新 repo 的 dispatch-only workflow 要先 touch 一個 commit 才會註冊，否則 workflow_dispatch 找不到。
 
+# workflow re-registration trigger 2026-10-26T17:36:53Z

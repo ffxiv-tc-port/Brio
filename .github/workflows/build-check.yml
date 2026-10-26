@@ -55,3 +55,4 @@ jobs:
 # 打包產物在 Brio/bin/Release/Brio/{latest.zip,Brio.json}（DalamudPackager.targets 的 MakeZip 已改成 true）。
 # 🔴 bin/x64/ 不存在——上游的 release-brio.yml 用的是 `dotnet build Brio.sln` 才會產生 bin/x64/Release，
 #    我們建的是 csproj，路徑不同。release.yml 的路徑要跟這裡一致，抄上游會在 Zip 步驟找不到目錄。
+# workflow re-registration trigger 2026-10-26T17:36:53Z
