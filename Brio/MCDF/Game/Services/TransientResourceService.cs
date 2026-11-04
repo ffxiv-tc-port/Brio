@@ -34,7 +34,10 @@ public class TransientResourceService : IDisposable
     //    Penumbra 的資源載入回呼給的也是位址),所以直接存位址值,永不解參。
     private readonly HashSet<(nint Address, ObjectKind ObjectKind)> _playerRelatedPointers = [];
     private ConcurrentDictionary<IntPtr, ObjectKind> _cachedFrameAddresses = [];
+    private bool _frameAddressesPresent;
     private ConcurrentDictionary<ObjectKind, HashSet<string>>? _semiTransientResources = null;
+
+    private static readonly ObjectKind[] AllObjectKinds = Enum.GetValues<ObjectKind>();
 
     private uint _lastClassJobId = uint.MaxValue;
 
@@ -256,7 +259,13 @@ public class TransientResourceService : IDisposable
 
     private void DalamudUtil_FrameworkUpdate()
     {
-        _cachedFrameAddresses = new(_playerRelatedPointers.Where(k => k.Address != nint.Zero).ToDictionary(c => c.Address, c => c.ObjectKind));
+        // 每幀呼叫：這一幀與上一幀都沒有位址時沿用同一份空字典（新建一份的鎖物件隨核心數增加）。
+        if(_playerRelatedPointers.Count != 0 || _frameAddressesPresent)
+        {
+            _cachedFrameAddresses = new(_playerRelatedPointers.Where(k => k.Address != nint.Zero).ToDictionary(c => c.Address, c => c.ObjectKind));
+            _frameAddressesPresent = !_cachedFrameAddresses.IsEmpty;
+        }
+
         lock(_cacheAdditionLock)
         {
             _cachedHandledPaths.Clear();
@@ -277,13 +286,27 @@ public class TransientResourceService : IDisposable
             SemiTransientResources[ObjectKind.Pet] = [.. petSpecificData ?? []];
         }
 
-        foreach(var kind in Enum.GetValues(typeof(ObjectKind)))
+        foreach(var kind in AllObjectKinds)
         {
-            if(!_cachedFrameAddresses.Any(k => k.Value == (ObjectKind)kind) && TransientResources.Remove((ObjectKind)kind, out _))
+            if(!HasFrameAddressOfKind(kind) && TransientResources.Remove(kind, out _))
             {
                 Brio.Log.Verbose("Object not present anymore: {kind}", kind);
             }
         }
+    }
+
+    private bool HasFrameAddressOfKind(ObjectKind kind)
+    {
+        if(!_frameAddressesPresent)
+            return false;
+
+        foreach(var entry in _cachedFrameAddresses)
+        {
+            if(entry.Value == kind)
+                return true;
+        }
+
+        return false;
     }
 
     public void RebuildSemiTransientResources()
