@@ -19,7 +19,7 @@
   "LoadSync": false,
   "CanUnloadAsync": false,
   "LoadPriority": 0,
-  "IconUrl": "https://raw.githubusercontent.com/ffxiv-tc-port/Brio/tc-7.20/Resources/Images/BrioIcon.png",
+  "IconUrl": "https://raw.githubusercontent.com/ffxiv-tc-port/Brio/tc-7.30/Resources/Images/BrioIcon.png",
   "Punchline": "在集體動作(GPose)中編輯角色與 NPC 的姿勢、表情與動畫。",
   "Changelog": "",
   "AcceptsFeedback": true,
