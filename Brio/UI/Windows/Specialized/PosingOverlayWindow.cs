@@ -161,7 +161,7 @@ public class PosingOverlayWindow : Window, IDisposable
 
             bool isFilled = clickable.CurrentlySelected || clickable.CurrentlyHovered;
 
-            var color = config.LightCircleHoveredColor;
+            var color = config.LightCircleNormalColor;
 
             if(clickable.CurrentlyHovered)
                 color = config.LightCircleHoveredColor;
