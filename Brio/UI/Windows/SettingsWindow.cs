@@ -548,8 +548,6 @@ public class SettingsWindow : Window
             {
                 _configurationService.Configuration.Posing.LightCircleNormalColor = ImGui.ColorConvertFloat4ToU32(lightCircleNormalColor);
                 _configurationService.ApplyChange();
-
-                Brio.Log.Error($"{ImGui.ColorConvertFloat4ToU32(lightCircleNormalColor)}");
             }
 
             Vector4 lightCircleHoveredColor = ImGui.ColorConvertU32ToFloat4(_configurationService.Configuration.Posing.LightCircleHoveredColor);
