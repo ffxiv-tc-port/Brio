@@ -36,12 +36,14 @@
 - 停用中的按鈕與勾選框，滑鼠移上去的說明照常顯示且亮度正常
 - 介面繁體中文化
 
-## 授權
+## 安裝
 
-Brio 採用 [GPL 3.0 授權](https://github.com/Etheirys/Brio/blob/main/LICENSE)。
+`/xlsettings` 開「Dalamud 設定」→「試驗性功能」→「第三方插件倉庫」，加入 `https://raw.githubusercontent.com/ffxiv-tc-port/DalamudPluginsTC/main/repo.json` 並啟用、儲存，再到「插件管理員」（`/xlplugins`）安裝；同一個插件只裝這裡的版本，不要同時裝上游版。
 
 原作者：[Minmoose](https://github.com/Minmoose)（維護者與開發者）、[Asgard](https://github.com/AsgardXIV)（原始維護者與開發者）
 
 特別感謝 Anamnesis、Dynamis、Ktisis、Penumbra、Glamourer、VFXEditor、Cammy
 等專案，完整名單見
 [Acknowledgements.md](https://github.com/Etheirys/Brio/blob/main/Acknowledgements.md)。
+
+授權：GPL-3.0（見 LICENSE）
